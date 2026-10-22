@@ -14,6 +14,6 @@ __pycache__/
 *.db3
 
 # 模型文件（几 MB 到几十 MB，用别的方式传）
-models/*.rknn
-models/*.onnx
-models/*.pt
+*.rknn
+*.onnx
+*.pt
