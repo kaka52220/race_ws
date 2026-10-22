@@ -1,0 +1,19 @@
+# colcon 生成的，不含源码
+build/
+install/
+log/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 记录文件（几 GB）
+*.bag
+*.mcap
+*.db3
+
+# 模型文件（几 MB 到几十 MB，用别的方式传）
+models/*.rknn
+models/*.onnx
+models/*.pt
