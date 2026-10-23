@@ -100,6 +100,9 @@ class VisionNode(Node):
         m.quality = float(r["quality"])
         m.is_lost = bool(r["is_lost"])
         m.mode = int(r["mode"])
+        # 诊断字段：调参时靠这两个判断卡在哪一环
+        m.n_points = int(r.get("n_pts", 0))
+        m.reject_reason = str(r.get("reject_reason", ""))[:120]
         self.pub_track.publish(m)
 
         # 调试图（低频）

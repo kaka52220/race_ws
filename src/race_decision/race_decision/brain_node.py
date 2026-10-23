@@ -42,15 +42,28 @@ class BrainNode(Node):
         self.declare_parameter("wheelbase_m", 0.143)
         self.declare_parameter("steer_max_deg", 25.0)
         self.declare_parameter("steer_trim_deg", 0.0)     # 直线跑偏时调这个
-        self.declare_parameter("steer_rate_deg_per_s", 300.0)  # 舵机变化率上限
+        self.declare_parameter("steer_rate_deg_per_s", 200.0)  # 舵机变化率上限
+        self.declare_parameter("steer_sign", 1.0)         # 方向翻转。★ 2026-10-23 静态实测：车偏左时前轮应指车道中心；设为 -1 时指外侧 → 正确的就是 +1
+        self.declare_parameter("steer_tau_s", 0.08)       # 转向低通时间常数（秒）。画龙就调大，0=关闭
 
         # 控制律
-        self.declare_parameter("stanley_k", 2.0)          # 横向纠偏增益，越大纠得越猛
-        self.declare_parameter("v_eps", 0.15)             # 防低速时纠偏项爆炸
+        self.declare_parameter("stanley_k", 1.5)          # 横向纠偏增益，越大纠得越猛
+        self.declare_parameter("v_eps", 0.0)              # 已由 v_stanley_min 提供固定分母，这里归零
 
         # 速度
-        self.declare_parameter("max_speed", 0.30)         # 全局最高速 m/s
-        self.declare_parameter("min_speed", 0.06)         # 转弯时最低速，别停
+        # ══════════════════════════════════════════════════════════
+        # ★★ 速度单位说明（2026-10-23 编码器实测，别改错 ★★
+        #   linear.x 在 base_node 的 run 模式下 = 归一化 0~1，
+        #   内部换算成 set_car_run 的百分比（linear.x=0.01 → 1%）。
+        #   这台车（亚博控制板 V3.0 / 固件 3.5 / 编码器 1267 脉冲每轮圈）实测：
+        #       1% → 0.163 m/s   ← 唯一可用的慢速
+        #       2% → 0.860 m/s   ← 直接跳 5 倍
+        #       3%~6% → 1.2 m/s  ← 饱和
+        #   所以 max_speed 只能取 0.01；取 0.02 就变 0.86 m/s，
+        #   取 0.03 会被 min_speed 顶到 3% → 1.2 m/s 直接冲出赛道。
+        # ══════════════════════════════════════════════════════════
+        self.declare_parameter("max_speed", 0.10)         # 全局最高速 m/s
+        self.declare_parameter("min_speed", 0.10)         # 转弯时最低速，别停
         self.declare_parameter("speed_scale", 1.0)        # 一键倍率：0.5 = 全部减半
         self.declare_parameter("a_lat", 0.8)              # 允许的侧向加速度 m/s²
         self.declare_parameter("accel", 0.8)              # 加速度上限
@@ -58,7 +71,10 @@ class BrainNode(Node):
 
         # 安全 / 调试
         self.declare_parameter("track_timeout_s", 0.5)    # 多久没视觉就停车
-        self.declare_parameter("lost_slowdown", 0.5)      # 丢线时速度乘这个系数
+        self.declare_parameter("lost_speed", 0.0)        # 丢线时的固定爬行速度（不要用乘法，会指数衰减）
+        self.declare_parameter("lost_enter_frames", 3)    # 连续丢几帧才进 LOST（滞回，防抖）
+        self.declare_parameter("lost_exit_frames", 8)     # 连续好帧几帧才退出 LOST
+        self.declare_parameter("v_stanley_min", 0.50)     # Stanley 分母的固定参考值（固件单位未知，改成常数=纯比例控制）
         self.declare_parameter("dry_run", False)          # true = 只算不发
         self.declare_parameter("control_hz", 50.0)
 
@@ -69,7 +85,10 @@ class BrainNode(Node):
         self.last_time = 0.0
         self.v_cmd = 0.0            # 当前指令速度（做加减速斜坡用）
         self.steer_prev = 0.0       # 上一帧舵机角（做变化率限制用）
+        self.delta_f = 0.0          # 低通滤波后的舵机角
         self.state = "WAIT"
+        self.lost_cnt = 0           # 连续丢线帧数（滞回用）
+        self.ok_cnt = 0             # 连续正常帧数（滞回用）
         self.n_ok = 0
         self.n_lost = 0
         self.t_last_log = self.get_clock().now().nanoseconds / 1e9
@@ -105,12 +124,34 @@ class BrainNode(Node):
 
         msg = self.last
 
-        # ── 丢线：不打死，减速慢慢找线 ──
+        # ── 丢线处理：固定爬行速度 + 滞回，**不能指数衰减** ──
+        #   老写法 v = v_cmd * lost_slowdown 每 20ms 执行一次，等于每 20ms 乘 0.5，
+        #   5 个周期就归零 → 车走走停停、速度锯齿（2026-10-23 实测日志抓到的）。
+        #   而且 CRUISING↔LOST 快速来回切，速度就在 0 和满速之间摆。
         if msg.is_lost:
+            self.lost_cnt += 1
+            self.ok_cnt = 0
+        else:
+            self.ok_cnt += 1
+            self.lost_cnt = 0
+
+        enter_lost = self.lost_cnt >= int(g("lost_enter_frames").value)
+        still_lost = self.state == "LOST" and self.ok_cnt < int(g("lost_exit_frames").value)
+
+        # ★ max_speed=0 表示「绝对停住，只算方向」——调试前轮用。
+        #   否则 min_speed / lost_speed 会把速度抬起来，车一直转，没法看前轮。
+        hold = float(g("max_speed").value) * float(g("speed_scale").value) <= 1e-6
+
+        if enter_lost or still_lost:
             self.state = "LOST"
-            v = self.v_cmd * float(g("lost_slowdown").value)
-            self.publish(max(v, 0.0), 0.0)      # 丢线时方向盘回正，别乱打
-            self.v_cmd = max(v, 0.0)
+            # 用一个**固定**的爬行速度，而不是在当前速度上乘系数
+            v = 0.0 if hold else float(g("lost_speed").value)
+            self.publish(v, 0.0)                # 丢线时方向盘回正，别乱打
+            self.v_cmd = v
+            # 把视觉给的失败原因打出来，省得每次都去开调试图
+            self.get_logger().warn(
+                f"丢线(黄点 {msg.n_points}): {msg.reject_reason}",
+                throttle_duration_sec=2.0)
             return
 
         self.state = "CRUISING"
@@ -125,7 +166,8 @@ class BrainNode(Node):
         else:
             v_curve = v_max
         v_target = min(v_max, v_curve)
-        v_target = max(v_target, float(g("min_speed").value))
+        if v_max > 1e-6:                       # max_speed=0 时不要被 min_speed 抬起来
+            v_target = max(v_target, float(g("min_speed").value))
 
         # 加减速斜坡（别一脚油门一脚刹车）
         if v_target > self.v_cmd:
@@ -135,10 +177,15 @@ class BrainNode(Node):
         self.v_cmd = v_cmd
 
         # ── Stanley 转向 ──
+        #   ⚠ 分母用 max(v_cmd, v_stanley_min)：车快停时会 v→0，分母趋近 v_eps，
+        #     纠偏角会冲到 90°，实测出现过 δ原始=-92.8° 的爆表值。
+        #     给分母一个速度下限，避免低速时纠偏项失控。
         steer_ff = math.atan(L * kappa)                      # 曲率前馈
+        v_eff = max(v_cmd, float(g("v_stanley_min").value))
         corr = math.atan(float(g("stanley_k").value) * e
-                         / (v_cmd + float(g("v_eps").value)))
+                         / (v_eff + float(g("v_eps").value)))
         delta = th - corr + steer_ff + math.radians(float(g("steer_trim_deg").value))
+        delta_raw = delta          # 滤波/限幅前的原始转角，只用于日志诊断
 
         # 限幅
         d_max = math.radians(float(g("steer_max_deg").value))
@@ -148,17 +195,44 @@ class BrainNode(Node):
         delta = max(self.steer_prev - rate, min(self.steer_prev + rate, delta))
         self.steer_prev = delta
 
-        # 舵机角 → 角速度（base_node 会反算回去）
-        omega = v_cmd * math.tan(delta) / L
-        self.publish(v_cmd, omega)
+        # ── 一阶低通阻尼（Stanley 本身没有阻尼项，不加会画龙）──
+        #   为什么需要：纯比例纠偏 + 系统延迟（视觉 16ms + 舵机响应 + 底盘）
+        #   = 相位滞后 = 正反馈 = 左右来回摆。这是控制里的常识。
+        #   tau 越大越平滑但越迟钝；tau=0 等于关掉滤波。
+        #     a = dt / (tau + dt)，dt 是控制周期（1/control_hz）
+        tau = float(g("steer_tau_s").value)
+        if tau > 1e-4:
+            dt = 1.0 / max(float(g("control_hz").value), 1.0)
+            a = dt / (tau + dt)
+            self.delta_f = a * delta + (1.0 - a) * self.delta_f
+            delta = self.delta_f
+        else:
+            self.delta_f = delta
+
+        # ── 关键：base_driver 把 angular.z 当成「舵机角（弧度）」直接收，不做运动学换算 ──
+        #   队友 base_node.py 里的写法：
+        #       steer_angle = int(-v_z * 57.3)      # 等价于 steer_angle = -degrees(angular.z)
+        #       steer_angle = max(-30, min(30, steer_angle))
+        #
+        #   ★ 2026-10-23 实测确认：发 angular.z=+0.5 → steer_angle=-28.6° → 前轮往【左】
+        #     所以底盘的约定是「舵机角为负 = 左，为正 = 右」，和常规正好相反。
+        #
+        #   我们的 delta 是「左正」：delta>0 要往左打，就需要 steer_angle = -degrees(delta)。
+        #   又因为 steer_angle = -degrees(omega)，所以：
+        #       -degrees(omega) = -degrees(delta)  ⟹  omega = +delta
+        #
+        #   ⚠ 绝不能用 omega = v·tan(δ)/L —— 那会让符号反掉，且幅度随速度翻倍。
+        omega = delta * float(g("steer_sign").value)
+        self.publish(0.0 if hold else v_cmd, omega)
 
         # 每 2 秒打一行日志
         if now - self.t_last_log > 2.0:
             self.t_last_log = now
             self.get_logger().info(
                 f"[{self.state}] e={e*100:+6.1f}cm θ={math.degrees(th):+5.2f}° "
-                f"κ={kappa:+.3f} → δ={math.degrees(delta):+5.1f}° "
-                f"v={v_cmd:.2f}m/s | ok={self.n_ok} lost={self.n_lost}")
+                f"κ={kappa:+.3f} → δ原始={math.degrees(delta_raw):+6.1f}° "
+                f"滤波后={math.degrees(delta):+6.1f}° "
+                f"v={v_cmd:.3f} | ok={self.n_ok} lost={self.n_lost}")
             self.n_ok = self.n_lost = 0
 
     # ─────────────────────────────────────────────────────────

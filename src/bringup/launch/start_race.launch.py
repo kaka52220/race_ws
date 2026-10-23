@@ -17,6 +17,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogI
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -27,11 +28,12 @@ def generate_launch_description():
         DeclareLaunchArgument("height", default_value="720"),
         DeclareLaunchArgument("dry_run", default_value="false",
                               description="true = 只算不发 /cmd_vel"),
-        DeclareLaunchArgument("max_speed", default_value="0.30"),
+        DeclareLaunchArgument("max_speed", default_value="0.01",
+                              description="归一化速度。这台车 0.01=1%=0.16m/s，0.02=2%=0.86m/s，0.03+=1.2m/s"),
         DeclareLaunchArgument("speed_scale", default_value="1.0"),
         DeclareLaunchArgument("publish_debug", default_value="true"),
-        DeclareLaunchArgument("base_driver", default_value="false",
-                              description="是否一起起底盘节点"),
+        DeclareLaunchArgument("base_driver", default_value="true",
+                              description="是否一起起底盘节点。只想看视觉时传 false"),
     ]
 
     # ① 摄像头。用 usb_cam 而不是 v4l2_camera ——
@@ -71,15 +73,19 @@ def generate_launch_description():
         executable="brain_node",
         name="brain_node",
         output="screen",
+        # ⚠ LaunchConfiguration 传出来的是**字符串**，直接塞给 double 参数会类型不匹配、
+        #   覆盖被静默忽略（2026-10-23 出现过 max_speed 改了不生效）。
+        #   必须用 ParameterValue(..., value_type=float) 显式转换类型。
         parameters=[{
-            "dry_run": LaunchConfiguration("dry_run"),
-            "max_speed": LaunchConfiguration("max_speed"),
-            "speed_scale": LaunchConfiguration("speed_scale"),
+            "dry_run": ParameterValue(LaunchConfiguration("dry_run"), value_type=bool),
+            "max_speed": ParameterValue(LaunchConfiguration("max_speed"), value_type=float),
+            "speed_scale": ParameterValue(LaunchConfiguration("speed_scale"), value_type=float),
         }],
         respawn=True, respawn_delay=1.0,
     )
 
-    # ④ 底盘（可选）
+    # ④ 底盘（默认一起起，否则 /cmd_vel 没人听，车不动）
+    #    只想单独看视觉时：ros2 launch ... base_driver:=false
     base = Node(
         package="base_driver",
         executable="base_node",

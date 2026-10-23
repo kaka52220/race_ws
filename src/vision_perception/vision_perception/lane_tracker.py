@@ -98,9 +98,22 @@ class LaneTracker:
 
         d = self.d_of_row.reshape(-1, 1)
         x = self.x_of_col.reshape(1, -1)
-        denom = h * math.sin(th) + d * math.cos(th)
-        yc = h * math.cos(th) - d * math.sin(th)
-        u = f * x / denom + cx
+
+        # ★ 相机偏航修正：相机镜头方向不一定和车头方向一致（实测装了约 9°）
+        #   把「车体坐标 (d, x)」先转到「相机坐标 (dc, xc)」，再做针孔投影。
+        #   yaw_deg > 0 表示相机相对车头向右偏。
+        #   不做这一步的话，鸟瞰图整体会被转一个角度，theta 就会有一个固定偏置，
+        #   而固定的 theta 偏置会让 Stanley 一直往一个方向打。
+        yaw = math.radians(p["yaw_deg"])
+        if abs(yaw) > 1e-6:
+            dc = d * math.cos(yaw) + x * math.sin(yaw)
+            xc = -d * math.sin(yaw) + x * math.cos(yaw)
+        else:
+            dc, xc = d, x
+
+        denom = h * math.sin(th) + dc * math.cos(th)
+        yc = h * math.cos(th) - dc * math.sin(th)
+        u = f * xc / denom + cx
         v = f * yc / denom + cy
 
         # ★ 几何有效性：地平线以上的像素不可能是地面，直接剔掉
@@ -189,16 +202,9 @@ class LaneTracker:
             #   choice 在 replace=False 时内部会生成整个数组的随机排列，复杂度 O(n)。
             #   n 上万时 80 次迭代能吃掉半秒 —— 实测就是这个把一帧拖到 500 ms。
             idx = rng.integers(0, n, 3)
-            u1, u2, u3 = u[idx]
-            d12, d13, d23 = u1 - u2, u1 - u3, u2 - u3
-            if min(abs(d12), abs(d13), abs(d23)) < 0.05:
+            pred = self._lagrange(u, x, idx)
+            if pred is None:
                 continue                  # 三点太挤，插值会爆
-            x1, x2, x3 = x[idx]
-            # 过三点的抛物线，用拉格朗日基函数直接求值（纯加减乘除，不碰 BLAS）
-            l1 = (u - u2) * (u - u3) / (d12 * d13)
-            l2 = (u - u1) * (u - u3) / (-d12 * d23)
-            l3 = (u - u1) * (u - u2) / (d13 * d23)
-            pred = x1 * l1 + x2 * l2 + x3 * l3
             cnt = int((np.abs(pred - x) < thr).sum())
             if cnt > best_cnt:
                 best_cnt, best_idx = cnt, idx
@@ -206,9 +212,16 @@ class LaneTracker:
         if best_idx is None or best_cnt < p["min_points_curve"]:
             return None, None
 
-        # 只在这一步做真正的最小二乘（此时点已很多，BLAS 才划算）
-        coef = _polyfit2(u, x)            # 先粗拟合
-        for _ in range(2):                # 两轮迭代剔除离群点
+        # ── 关键：用**胜出的那三个点的内点**做初始最小二乘，而不是全部点 ──
+        #   全点拟合会被上万离群点拖飞，之后内点筛选就再也回不来了。
+        #   （这个 bug 表现是"有一万多个黄像素却凑不出线"，正是诊断字段抓出来的）
+        pred = self._lagrange(u, x, best_idx)
+        inl = np.abs(pred - x) < thr
+        if inl.sum() < p["min_points_curve"]:
+            return None, None
+        coef = _polyfit2(u[inl], x[inl])
+
+        for _ in range(2):                # 两轮迭代进一步剔除离群点
             resid = np.abs(np.polyval(coef, u) - x)
             inl = resid < thr
             if inl.sum() < p["min_points_curve"]:
@@ -223,6 +236,22 @@ class LaneTracker:
             full[sel] = mask_sub
             return coef, full
         return coef, mask_sub
+
+    @staticmethod
+    def _lagrange(u, x, idx):
+        """过 idx 三个点的抛物线在所有 u 上的取值（纯算术，不碰 BLAS）。
+
+        返回 None 表示这三点太挤，插值数值上不可信（RANSAC 里直接跳过这一轮）。
+        """
+        u1, u2, u3 = u[idx]
+        d12, d13, d23 = u1 - u2, u1 - u3, u2 - u3
+        if min(abs(d12), abs(d13), abs(d23)) < 0.05:
+            return None
+        x1, x2, x3 = x[idx]
+        l1 = (u - u2) * (u - u3) / (d12 * d13)
+        l2 = (u - u1) * (u - u3) / (-d12 * d23)
+        l3 = (u - u1) * (u - u2) / (d13 * d23)
+        return x1 * l1 + x2 * l2 + x3 * l3
 
     # ── 便捷：在距离 d 处的横坐标 / 切向 ──────────────────────
     def poly_at(self, coef, d):
@@ -272,27 +301,37 @@ class LaneTracker:
         out = {
             "bev": bev, "mask": mask, "pts": pts,
             "coefL": None, "coefR": None, "mid_coef": None,
-            "mode": 3, "is_lost": True, "reject_reason": "无有效像素",
+            "mode": 3, "is_lost": True,
+            "reject_reason": "鸟瞰图里一个黄像素都没有（没对着赛道/相机没图/阈值太严）",
             "e_m": 0.0, "theta_rad": 0.0, "curvature": 0.0,
             "lane_width_m": p["lane_width_m"], "quality": 0.0,
             "n_pts": len(pts),
         }
         if len(pts) < p["min_points_curve"]:
+            out["reject_reason"] = (f"黄像素仅 {len(pts)} 个，"
+                                    f"少于要求的 {p['min_points_curve']} 个")
             return out
 
-        # 顺序 RANSAC：找第一条，剔掉它的内点，再找第二条
+        # 顺序 RANSAC：找第一条，剔除它，再找第二条
         c1, in1 = self.ransac_poly(pts, rng)
         if c1 is None:
+            out["reject_reason"] = (f"有 {len(pts)} 个黄像素，"
+                                    f"但凑不出连续的线（可能都是噪点/其他黄色物体）")
             return out
-        rest = pts[~in1]
+
+        # ★ 剔除第一条线时要用「线半宽」，不能用内点阈值
+        #   黄线本身约 10 cm 宽，而内点阈值只有 3 cm。
+        #   如果只按 3 cm 剔除，同一条线的剩余像素会被第二次 RANSAC
+        #   当成「另一条线」拟合出来 —— 表现为两条线间距 0.28 m 而不是 0.54 m，
+        #   于是配对被拒，退化成单边模式。2026-10-23 从数据里查出来的。
+        dist1 = np.abs(np.polyval(c1, pts[:, 0] - self.d0) - pts[:, 1])
+        rest = pts[dist1 > p["line_half_width_m"]]
         c2 = None
         if len(rest) >= p["min_points_curve"]:
             c2, _ = self.ransac_poly(rest, rng)
 
         d_ref = p["eval_d_m"]
         d_head = p["heading_d_m"]
-        curves = [c1] if c2 is None else [c1, c2]
-        pair = self.pair_curves(curves, d_ref) if len(curves) == 2 else None
 
         # ── 数据支撑范围：拟合只在有点的地方可信，不能凭空调外推 ──
         inl = pts[in1]
@@ -302,9 +341,14 @@ class LaneTracker:
         if span < p["min_span_m"]:
             out.update(reject_reason=f"有效点只跨 {span:.2f}m，太短，拟合不可信")
             return out
-        # 评估点夹到数据范围内（外推不可信）
+        # ★ 必须在配对之前把评估点夹进数据范围：
+        #   否则配对用 0.6 m 判断间距，宽度却算在夹过的距离上，两者不一致，
+        #   会出现「间距 0.14 m 却判成双边」的情况（2026-10-23 从效果图里发现）。
         d_ref = min(max(d_ref, d_lo), d_hi)
         d_head = min(max(d_head, d_lo), d_hi)
+
+        curves = [c1] if c2 is None else [c1, c2]
+        pair = self.pair_curves(curves, d_ref) if len(curves) == 2 else None
 
         if pair is not None:
             iL, iR = pair
@@ -433,14 +477,33 @@ class LaneTracker:
         return canvas
 
 
-if __name__ == "__main__":
-    trk = LaneTracker()
+def _print_geometry(trk):
+    """打印几何自检表 —— 标定的时候对着这张表看。
+
+    注意这里给的是**原图行号**（不是鸟瞰图行号），因为标定时你是在原图上量位置。
+    """
+    p = trk.p
+    h = p["h_m"]
+    th = math.radians(p["pitch_deg"])
     print(f"焦距 f = {trk.f:.1f} px，地平线在第 {trk.horizon_row:.0f} 行")
     print(f"鸟瞰图 {trk.Wb}x{trk.Hb}px = {trk.Wb*trk.mpp:.2f}m x "
-          f"{trk.d_max-trk.d_min:.2f}m")
-    print(f"有效地面最远 {trk.d_valid_max:.2f} m（再远就采到地平线以上了）")
-    for d in (trk.d_min, trk.p["eval_d_m"], trk.p["heading_d_m"], trk.d_max):
-        row = (trk.d_max - d) / (trk.d_max - trk.d_min) * (trk.Hb - 1)
-        print(f"  d={d:.2f}m -> 第 {row:6.1f} 行  "
-              f"{'OK' if 0 <= row < trk.Hb else '超出鸟瞰图'}  "
-              f"{'有效' if d <= trk.d_valid_max else '★ 超过有效地面距离'}")
+          f"{trk.d_max-trk.d_min:.2f}m（车前 {trk.d_min:.2f} ~ {trk.d_max:.2f} m）")
+    print()
+    print("  地面距离 → 原图第几行（★ 标定时用这张表对照）")
+    print("  " + "-" * 46)
+    for d in (0.30, p["eval_d_m"], 0.80, p["heading_d_m"], 1.50, 2.00, 3.00):
+        Z = h * math.sin(th) + d * math.cos(th)
+        Yc = h * math.cos(th) - d * math.sin(th)
+        row = trk.cy + trk.f * Yc / Z
+        mark = ""
+        if row < trk.horizon_row + p["horizon_margin_px"]:
+            mark = "  ★ 在地平线以上，无效"
+        elif row >= p["img_h"]:
+            mark = "  ★ 超出画面"
+        elif row < p["roi_top"]:
+            mark = "  ★ 被 ROI 裁掉了（roi_top=%d）" % p["roi_top"]
+        print(f"    {d:4.2f} m  →  第 {row:6.1f} 行{mark}")
+
+
+if __name__ == "__main__":
+    _print_geometry(LaneTracker())
