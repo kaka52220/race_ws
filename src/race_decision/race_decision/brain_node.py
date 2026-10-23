@@ -9,8 +9,9 @@ brain_node.py —— 决策 + 运动控制
 
 控制律：Stanley（比 PID 稳，参数有物理意义）
 
-    δ = θ_e  −  atan(k·e / (v + v_eps))  +  atan(L·κ)
-        └─航向─┘  └────横向纠偏────┘     └─曲率前馈─┘
+    δ = θ_e  −  atan(k·e / v)  +  atan(L·κ)
+        └─航向─┘  └──横向纠偏──┘   └─曲率前馈─┘
+    （v 取 max(v_cmd, v_stanley_min)，防止低速时分母趋零把纠偏角放大到 90°）
 
     δ: 舵机角（左正）
     θ_e: 车道方向相对车头的角度（左正）—— 车道往左拐就左打
@@ -48,22 +49,14 @@ class BrainNode(Node):
 
         # 控制律
         self.declare_parameter("stanley_k", 1.5)          # 横向纠偏增益，越大纠得越猛
-        self.declare_parameter("v_eps", 0.0)              # 已由 v_stanley_min 提供固定分母，这里归零
 
-        # 速度
-        # ══════════════════════════════════════════════════════════
-        # ★★ 速度单位说明（2026-10-23 编码器实测，别改错 ★★
-        #   linear.x 在 base_node 的 run 模式下 = 归一化 0~1，
-        #   内部换算成 set_car_run 的百分比（linear.x=0.01 → 1%）。
-        #   这台车（亚博控制板 V3.0 / 固件 3.5 / 编码器 1267 脉冲每轮圈）实测：
-        #       1% → 0.163 m/s   ← 唯一可用的慢速
-        #       2% → 0.860 m/s   ← 直接跳 5 倍
-        #       3%~6% → 1.2 m/s  ← 饱和
-        #   所以 max_speed 只能取 0.01；取 0.02 就变 0.86 m/s，
-        #   取 0.03 会被 min_speed 顶到 3% → 1.2 m/s 直接冲出赛道。
-        # ══════════════════════════════════════════════════════════
-        self.declare_parameter("max_speed", 0.10)         # 全局最高速 m/s
-        self.declare_parameter("min_speed", 0.10)         # 转弯时最低速，别停
+        # 速度：linear.x 是归一化 0~1，base_node 乘 100 得到 set_car_run 的百分比。
+        # 新固件实测（2026-10-24，落地编码器）：每 1% ≈ 0.0134 m/s，线性、带负载补偿。
+        #   speed  8 → 0.106 m/s    speed 12 → 0.161 m/s
+        #   speed 10 → 0.138 m/s    speed 15 → 0.208 m/s
+        # 所以 max_speed=0.12 → 12% → 0.161 m/s。
+        self.declare_parameter("max_speed", 0.12)         # 全局最高速
+        self.declare_parameter("min_speed", 0.12)         # 转弯时最低速，别停
         self.declare_parameter("speed_scale", 1.0)        # 一键倍率：0.5 = 全部减半
         self.declare_parameter("a_lat", 0.8)              # 允许的侧向加速度 m/s²
         self.declare_parameter("accel", 0.8)              # 加速度上限
@@ -71,7 +64,7 @@ class BrainNode(Node):
 
         # 安全 / 调试
         self.declare_parameter("track_timeout_s", 0.5)    # 多久没视觉就停车
-        self.declare_parameter("lost_speed", 0.0)        # 丢线时的固定爬行速度（不要用乘法，会指数衰减）
+        self.declare_parameter("lost_speed", 0.05)        # 丢线时的固定爬行速度（不要用乘法，会指数衰减）
         self.declare_parameter("lost_enter_frames", 3)    # 连续丢几帧才进 LOST（滞回，防抖）
         self.declare_parameter("lost_exit_frames", 8)     # 连续好帧几帧才退出 LOST
         self.declare_parameter("v_stanley_min", 0.50)     # Stanley 分母的固定参考值（固件单位未知，改成常数=纯比例控制）
@@ -124,10 +117,10 @@ class BrainNode(Node):
 
         msg = self.last
 
-        # ── 丢线处理：固定爬行速度 + 滞回，**不能指数衰减** ──
-        #   老写法 v = v_cmd * lost_slowdown 每 20ms 执行一次，等于每 20ms 乘 0.5，
-        #   5 个周期就归零 → 车走走停停、速度锯齿（2026-10-23 实测日志抓到的）。
-        #   而且 CRUISING↔LOST 快速来回切，速度就在 0 和满速之间摆。
+        # ── 丢线处理：固定爬行速度 + 滞回 ──
+        #   不要写成「每帧把速度乘一个系数」：20ms 一帧乘 0.5，五个周期就归零，
+        #   表现为走走停停、速度锯齿，而且 CRUISING↔LOST 来回切。
+        #   给一个固定的 lost_speed，配合 enter/exit 帧数滞回，就平稳了。
         if msg.is_lost:
             self.lost_cnt += 1
             self.ok_cnt = 0
@@ -177,13 +170,10 @@ class BrainNode(Node):
         self.v_cmd = v_cmd
 
         # ── Stanley 转向 ──
-        #   ⚠ 分母用 max(v_cmd, v_stanley_min)：车快停时会 v→0，分母趋近 v_eps，
-        #     纠偏角会冲到 90°，实测出现过 δ原始=-92.8° 的爆表值。
-        #     给分母一个速度下限，避免低速时纠偏项失控。
+        #   分母给一个速度下限：车快停时 v→0，纠偏角会冲到 90°（实测出现过 -92.8°）。
         steer_ff = math.atan(L * kappa)                      # 曲率前馈
         v_eff = max(v_cmd, float(g("v_stanley_min").value))
-        corr = math.atan(float(g("stanley_k").value) * e
-                         / (v_eff + float(g("v_eps").value)))
+        corr = math.atan(float(g("stanley_k").value) * e / v_eff)
         delta = th - corr + steer_ff + math.radians(float(g("steer_trim_deg").value))
         delta_raw = delta          # 滤波/限幅前的原始转角，只用于日志诊断
 
