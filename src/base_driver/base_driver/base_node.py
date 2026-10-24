@@ -17,14 +17,6 @@ base_driver —— 阿克曼底盘驱动节点（ROS 2）
     set_car_run(state, speed)       state 0=停 1=前进 2=后退，speed 0~100
     set_akm_steering_angle(deg)     前轮舵机角，负=左、正=右（2026-10-24 现场验证）
 
-反馈（2026-10-24 v2 新增，给 brain 的融合估计器用）：
-    /imu          sensor_msgs/Imu          angular_velocity.z = 偏航角速度 rad/s，**左正**
-                                           （get_gyroscope_data() 的 g_z × gyro_scale × gyro_sign）
-                                           linear_acceleration = get_accelerometer_data()
-    /wheel_speed  geometry_msgs/TwistStamped linear.x = v_x × speed_fb_scale [m/s]
-    底板每 10 ms 发一包、四包轮换，所以每种数据 40 ms 刷新一次；这里按 imu_hz 发布。
-    ★ 首次上车先跑 tools/check_imu.py 确认 gyro_scale / gyro_sign / speed_fb_scale。
-
 安全（底盘固件没有指令超时保护，实测）：
     启动先停车、看门狗 0.5s、收到 SIGINT/SIGTERM/SIGHUP 先停车再退出。
 """
@@ -33,8 +25,7 @@ import time
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist, TwistStamped
-from sensor_msgs.msg import Imu
+from geometry_msgs.msg import Twist
 from Rosmaster_Lib import Rosmaster
 
 
@@ -56,13 +47,6 @@ class BaseDriverNode(Node):
         self.declare_parameter('mps_per_pct', 0.0134)
         self.declare_parameter('steer_hw_max_deg', 40.0)  # 硬件舵机物理限幅，兜底用
         self.declare_parameter('debug_log', True)
-        # ── IMU / 车速反馈 ──
-        self.declare_parameter('publish_feedback', True)
-        self.declare_parameter('imu_hz', 50.0)
-        self.declare_parameter('gyro_scale', 1.0)     # g_z → rad/s（驱动库已换算成 rad/s 时为 1）
-        self.declare_parameter('gyro_sign', 1.0)      # 左转为正就是 +1；check_imu.py 实测
-        self.declare_parameter('gyro_bias_s', 1.0)    # 启动静止时采多少秒估零偏
-        self.declare_parameter('speed_fb_scale', 1.0)  # v_x → m/s 的修正系数
 
         self.bot = Rosmaster(com='/dev/robot_base')
         self.bot.create_receive_threading()
@@ -82,60 +66,6 @@ class BaseDriverNode(Node):
         # 看门狗：0.5 秒没收到指令就停车
         self.last_cmd_time = time.time()
         self.create_timer(0.1, self.watchdog)
-
-        # IMU / 车速反馈
-        self.gz_bias = 0.0
-        if bool(self.get_parameter('publish_feedback').value):
-            self.gz_bias = self.estimate_gyro_bias()
-            self.pub_imu = self.create_publisher(Imu, '/imu', 20)
-            self.pub_speed = self.create_publisher(TwistStamped, '/wheel_speed', 20)
-            hz = max(float(self.get_parameter('imu_hz').value), 1.0)
-            self.create_timer(1.0 / hz, self.publish_feedback)
-            self.get_logger().info(
-                f"📡 发布 /imu /wheel_speed，{hz:.0f} Hz，陀螺零偏 {self.gz_bias:+.4f}")
-
-    def estimate_gyro_bias(self):
-        """启动时车是停着的：采 gyro_bias_s 秒 g_z 取平均当零偏。"""
-        n, acc = 0, 0.0
-        t_end = time.time() + float(self.get_parameter('gyro_bias_s').value)
-        while time.time() < t_end:
-            try:
-                acc += float(self.bot.get_gyroscope_data()[2])
-                n += 1
-            except Exception:
-                pass
-            time.sleep(0.02)
-        return acc / n if n else 0.0
-
-    def publish_feedback(self):
-        g = self.get_parameter
-        try:
-            ax, ay, az = self.bot.get_accelerometer_data()
-            gx, gy, gz = self.bot.get_gyroscope_data()
-            vx, vy, vz = self.bot.get_motion_data()
-        except Exception as ex:          # 串口偶发异常不能把节点带崩
-            self.get_logger().warn(f'读 IMU 失败: {ex}', throttle_duration_sec=2.0)
-            return
-        stamp = self.get_clock().now().to_msg()
-        k = float(g('gyro_scale').value) * float(g('gyro_sign').value)
-
-        m = Imu()
-        m.header.stamp = stamp
-        m.header.frame_id = 'base_link'
-        m.orientation_covariance[0] = -1.0           # 不提供姿态
-        m.angular_velocity.x = float(gx) * k
-        m.angular_velocity.y = float(gy) * k
-        m.angular_velocity.z = (float(gz) - self.gz_bias) * k
-        m.linear_acceleration.x = float(ax)
-        m.linear_acceleration.y = float(ay)
-        m.linear_acceleration.z = float(az)
-        self.pub_imu.publish(m)
-
-        s = TwistStamped()
-        s.header.stamp = stamp
-        s.header.frame_id = 'base_link'
-        s.twist.linear.x = float(vx) * float(g('speed_fb_scale').value)
-        self.pub_speed.publish(s)
 
     def safe_stop(self):
         """停车。连发几次，因为要保证这一帧串口写真的到得了底盘。"""
