@@ -66,10 +66,10 @@ class BrainNode(Node):
         #   speed  8 → 0.106 m/s    speed 12 → 0.161 m/s
         #   speed 10 → 0.138 m/s    speed 15 → 0.208 m/s
         # 所以 max_speed=0.12 → 12% → 0.161 m/s。
-        self.declare_parameter("max_speed", 0.50)         # 全局最高速（米/秒）
-        self.declare_parameter("min_speed", 0.15)         # 转弯时最低速（米/秒），别停。必须 < max_speed，否则弯道限速失效
+        self.declare_parameter("max_speed", 0.21)         # 全局最高速（米/秒）
+        self.declare_parameter("min_speed", 0.21)         # 转弯时最低速（米/秒），别停
         self.declare_parameter("speed_scale", 1.0)        # 一键倍率：0.5 = 全部减半
-        self.declare_parameter("a_lat", 0.15)             # 允许的侧向加速度 m/s²。越小弯道越慢（0.15 → κ>3.4 才压到 0.21 以下）
+        self.declare_parameter("a_lat", 0.8)              # 允许的侧向加速度 m/s²
         self.declare_parameter("accel", 0.8)              # 加速度上限
         self.declare_parameter("decel", 1.5)              # 减速度上限
 
