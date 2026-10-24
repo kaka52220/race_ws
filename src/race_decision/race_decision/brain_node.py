@@ -28,6 +28,8 @@ brain_node.py —— 决策 + 运动控制
 """
 import math
 
+from collections import deque
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
@@ -57,23 +59,27 @@ class BrainNode(Node):
         # 转向律的权重（0~1）。见下方 on_track 里的说明。
         #   实测：e 平滑可信、theta 乱跳，所以先只用 e。
         self.declare_parameter("theta_gain", 0.0)   # 航向角权重
-        self.declare_parameter("kappa_gain", 0.0)   # 曲率前馈权重
+        self.declare_parameter("kappa_gain", 0.5)   # 曲率前馈权重。v3 的 κ 比旧版准，0.5 起步
 
         # 速度：linear.x 是归一化 0~1，base_node 乘 100 得到 set_car_run 的百分比。
         # 新固件实测（2026-10-24，落地编码器）：每 1% ≈ 0.0134 m/s，线性、带负载补偿。
         #   speed  8 → 0.106 m/s    speed 12 → 0.161 m/s
         #   speed 10 → 0.138 m/s    speed 15 → 0.208 m/s
         # 所以 max_speed=0.12 → 12% → 0.161 m/s。
-        self.declare_parameter("max_speed", 0.21)         # 全局最高速（米/秒）
-        self.declare_parameter("min_speed", 0.21)         # 转弯时最低速（米/秒），别停
+        self.declare_parameter("max_speed", 0.50)         # 全局最高速（米/秒）
+        self.declare_parameter("min_speed", 0.15)         # 转弯时最低速（米/秒），别停。必须 < max_speed，否则弯道限速失效
         self.declare_parameter("speed_scale", 1.0)        # 一键倍率：0.5 = 全部减半
-        self.declare_parameter("a_lat", 0.8)              # 允许的侧向加速度 m/s²
+        self.declare_parameter("a_lat", 0.15)             # 允许的侧向加速度 m/s²。越小弯道越慢（0.15 → κ>3.4 才压到 0.21 以下）
         self.declare_parameter("accel", 0.8)              # 加速度上限
         self.declare_parameter("decel", 1.5)              # 减速度上限
 
         # 安全 / 调试
         self.declare_parameter("track_timeout_s", 0.5)    # 多久没视觉就停车
         self.declare_parameter("lost_speed", 0.07)        # 丢线时的固定爬行速度（不要用乘法，会指数衰减）
+        # ★ 丢线时「往哪转往哪转」：参考最近几帧的转向角，不回正。
+        #   弯道里一丢线就回正，车会直冲出去（2026-10-24 推车过弯实测）。
+        self.declare_parameter("lost_hold_n", 3)          # 参考最近几帧
+        self.declare_parameter("lost_hold_min_n", 3)      # 至少几帧历史才敢沿用（否则回正）
         self.declare_parameter("lost_enter_frames", 3)    # 连续丢几帧才进 LOST（滞回，防抖）
         self.declare_parameter("lost_exit_frames", 8)     # 连续好帧几帧才退出 LOST
         self.declare_parameter("v_stanley_min", 0.50)     # Stanley 分母的速度下限（米/秒）。
@@ -101,6 +107,8 @@ class BrainNode(Node):
         self.delta_f = 0.0          # 低通滤波后的舵机角
         self.state = "WAIT"
         self.lost_cnt = 0           # 连续丢线帧数（滞回用）
+        # 最近若干帧的转向角，丢线时沿用（「往哪转往哪转」，不回正）
+        self.steer_hist = deque(maxlen=15)
         self.ok_cnt = 0             # 连续正常帧数（滞回用）
         self.n_ok = 0
         self.n_lost = 0
@@ -160,11 +168,27 @@ class BrainNode(Node):
             self.state = "LOST"
             # 用一个**固定**的爬行速度，而不是在当前速度上乘系数
             v = 0.0 if hold else float(g("lost_speed").value)
-            self.publish(v, 0.0)                # 丢线时方向盘回正，别乱打
+            # ★ 丢线时不要回正，保持「刚才往哪转」。
+            #   原来这里是 publish(v, 0.0) —— 方向盘瞬间回正。
+            #   实测后果（2026-10-24 推车过弯）：弯道里一丢线就掰直，
+            #   车直冲出去，等重新看见线时已经在赛道外了。
+            #   取最近 lost_hold_n 帧真实转向角的**中位数**：
+            #     · 中位数不怕偶发野值（实测混一个 -80° 进去，平均被带到 0°，中位数还是 20°）
+            #     · 只取最近几帧，不用整段历史，弯道里不会滞后
+            #   为什么用历史而不是外推预测：只需要「别停、别回正」，
+            #   外推在弯道里容易打过头（舵机 25° 才转前轮 15.2°，本来就非线性）。
+            n_hold = int(g("lost_hold_n").value)
+            recent = list(self.steer_hist)[-n_hold:]
+            if len(recent) >= int(g("lost_hold_min_n").value):
+                steer_lost = float(np.median(recent))
+            else:
+                steer_lost = 0.0        # 刚起步就丢，没有历史，回正最安全
+            self.publish(v, steer_lost)
             self.v_cmd = v
             # 把视觉给的失败原因打出来，省得每次都去开调试图
             self.get_logger().warn(
-                f"丢线(黄点 {msg.n_points}): {msg.reject_reason}",
+                f"丢线(黄点 {msg.n_points}): {msg.reject_reason}"
+                f" | 保持转向 {math.degrees(steer_lost):+.1f}°",
                 throttle_duration_sec=2.0)
             return
 
@@ -246,6 +270,9 @@ class BrainNode(Node):
             delta = self.delta_f
         else:
             self.delta_f = delta
+
+        # 记下这一帧的转向角，丢线时用它「往哪转往哪转」
+        self.steer_hist.append(float(delta))
 
         # ── 关键：base_driver 把 angular.z 当成「舵机角（弧度）」直接收，不做运动学换算 ──
         #   队友 base_node.py 里的写法：
