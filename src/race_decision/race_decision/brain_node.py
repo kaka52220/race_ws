@@ -79,7 +79,7 @@ class BrainNode(Node):
         # ★ 丢线时「往哪转往哪转」：参考最近几帧的转向角，不回正。
         #   弯道里一丢线就回正，车会直冲出去（2026-10-24 推车过弯实测）。
         self.declare_parameter("lost_hold_n", 3)          # 参考最近几帧
-        self.declare_parameter("lost_hold_min_n", 3)      # 至少几帧历史才敢沿用（否则回正）
+        self.declare_parameter("lost_hold_min_n", 1)      # 至少几帧历史才沿用。1 = 只要跑过一帧就不回正
         self.declare_parameter("lost_enter_frames", 3)    # 连续丢几帧才进 LOST（滞回，防抖）
         self.declare_parameter("lost_exit_frames", 8)     # 连续好帧几帧才退出 LOST
         self.declare_parameter("v_stanley_min", 0.50)     # Stanley 分母的速度下限（米/秒）。
@@ -182,8 +182,9 @@ class BrainNode(Node):
             if len(recent) >= int(g("lost_hold_min_n").value):
                 steer_lost = float(np.median(recent))
             else:
-                steer_lost = 0.0        # 刚起步就丢，没有历史，回正最安全
-            self.publish(v, steer_lost)
+                steer_lost = 0.0        # 只有刚上电、一帧都没跑过时才会走到这里
+            # ⚠ 必须和正常帧一样乘 steer_sign，否则改了符号后丢线会往反方向打
+            self.publish(v, steer_lost * float(g("steer_sign").value))
             self.v_cmd = v
             # 把视觉给的失败原因打出来，省得每次都去开调试图
             self.get_logger().warn(
