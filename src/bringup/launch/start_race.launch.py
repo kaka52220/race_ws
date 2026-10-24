@@ -28,7 +28,7 @@ def generate_launch_description():
         DeclareLaunchArgument("height", default_value="720"),
         DeclareLaunchArgument("dry_run", default_value="false",
                               description="true = 只算不发 /cmd_vel"),
-        DeclareLaunchArgument("max_speed", default_value="0.01",
+        DeclareLaunchArgument("max_speed", default_value="0.21",
                               description="归一化速度。这台车 0.01=1%=0.16m/s，0.02=2%=0.86m/s，0.03+=1.2m/s"),
         DeclareLaunchArgument("speed_scale", default_value="1.0"),
         DeclareLaunchArgument("publish_debug", default_value="true"),
@@ -58,12 +58,18 @@ def generate_launch_description():
     )
 
     # ② 视觉：订阅图像，发 /track
+    #   ⚠ publish_debug 必须显式转成 bool：LaunchConfiguration 返回的是字符串，
+    #     直接传进去 bool("false") 还是 True，参数根本关不掉。
+    #     调试图 visualize() 一次 10~15 ms，跑车时开着会明显拖慢帧率。
     vision = Node(
         package="vision_perception",
         executable="vision_node",
         name="vision_node",
         output="screen",
-        parameters=[{"publish_debug": LaunchConfiguration("publish_debug")}],
+        parameters=[{
+            "publish_debug": ParameterValue(
+                LaunchConfiguration("publish_debug"), value_type=bool),
+        }],
         respawn=True, respawn_delay=1.0,
     )
 

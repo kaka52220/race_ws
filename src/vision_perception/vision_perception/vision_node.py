@@ -35,7 +35,7 @@ class VisionNode(Node):
 
         # ── 算法参数：默认值来自 lane_params.py（唯一来源）──
         # 想在命令行临时改：ros2 run ... --ros-args -p lane.pitch_deg:=11.0
-        self.declare_parameter("debug_image_hz", 10.0)
+        self.declare_parameter("debug_image_hz", 3.0)   # 3 Hz 够看，10 Hz 会让帧率掉到 17
         self.declare_parameter("image_topic", "/camera/image_raw")
         self.declare_parameter("publish_debug", True)
         # 把 lane_params 里的每个参数都登记成 ROS 参数（前缀 lane.）

@@ -65,6 +65,12 @@ class LaneTracker:
         if overrides:
             self.p.update(overrides)
         self._build_ipm()
+        self.prev_pair = None      # 上一帧的双边拟合结果，用作本帧搜索先验
+        self.prev_mid = None       # 上一帧的车道中线，用于跳变剔除
+        self.prev_theta = None     # 上一帧的航向角，用于跳变剔除
+        # 车道宽是「状态」不是常数：这条赛道 1→2 直道 0.54 m，
+        # 3→4 顶部回旋区和 5/6 中间广场宽得多。每帧实测后用 EMA 更新。
+        self.w_ref = float(self.p["lane_width_m"])
 
     # ── IPM：地面 (d, x) → 原图 (u, v) ─────────────────────────
     # 相机坐标 X 右、Y 下、Z 前；相机离地 h，俯角 θ。
@@ -261,28 +267,80 @@ class LaneTracker:
         u = d - self.d0
         return float(2 * coef[0] * u + coef[1])
 
-    # ── ⑤ 按车道宽配对 ───────────────────────────────────────
-    def pair_curves(self, curves, d_ref):
-        """从若干条曲线里挑出「间距最接近车道宽」的一对，并定出左右。"""
+    # ── 在「距第一条线 want ± band」的带子里，左右各拟合一条候选 ──
+    def _fit_line(self, pts, rng):
+        """拟合一条线，并验证它**真的是线**（点数够 + 跨度够）。
+
+        为什么必须验证：
+            之前配对线完全没有质量检查，只要带子里有几粒黄点就能拟合出一条"线"。
+            实测（2026-10-24）：左转时画面里只有右边一条线，算法却报「双边」，
+            第二条是从远处散落的黄点里凭空造出来的，两条线的方向都不对。
+            主拟合线一直有这两道检查，配对线也应该有 —— 这不是加限制，
+            是把「一条线」的定义统一。
+        """
         p = self.p
-        want = p["lane_width_m"]
+        if len(pts) < p["min_points_curve"]:
+            return None
+        coef, inl = self.ransac_poly(pts, rng)
+        if coef is None or inl is None:
+            return None
+        inlier_pts = pts[inl]
+        if len(inlier_pts) < p["min_points_curve"]:
+            return None
+        span = float(inlier_pts[:, 0].max() - inlier_pts[:, 0].min())
+        if span < p["min_span_m"]:
+            return None                          # 只在很短一段里有点 → 不是线
+        return coef
+
+    def _partner_cands(self, rest, dx, want, band, rng):
+        out = []
+        for side in (-1.0, 1.0):
+            sel = np.abs(dx - side * want) < band
+            c = self._fit_line(rest[sel], rng)
+            if c is not None:
+                out.append(c)
+        return out
+
+    # ── ⑤ 配对：挑「间距稳定、且最接近当前宽度估计」的一对 ──
+    def pair_curves(self, curves, d_ref):
+        """从若干条曲线里挑出一对车道边，并定出左右。
+
+        三条判据，都来自几何事实，不是拍脑袋的阈值：
+          1) 间距落在 [partner_min_m, partner_max_m] 内（物理上可能的车道宽）
+          2) **间距在整段深度上保持稳定**——同一条车道的两条边是平行的，
+             间距处处相等；两条相交的线间距会趋近 0。
+             2026-10-24 静态扫描发现的：弯道入口处配对的两条线在画面上方交汇成 V 形，
+             theta 于是报出 +35.8°，而车其实是摆正的。
+          3) 在满足前两条的组合里，取最接近自适应宽度估计 w_ref 的那对
+        """
+        p = self.p
+        lo, hi = p["partner_min_m"], p["partner_max_m"]
+        ratio_max = p["pair_gap_ratio_max"]
+        # 在 d_ref 上下各取一段深度做间距稳定性检查
+        d_lo = max(self.d_min, d_ref - 0.35)
+        d_hi = min(self.d_max, d_ref + 0.35)
+        ds = np.linspace(d_lo, d_hi, 5)
+
         best = None
         for i in range(len(curves)):
             for j in range(i + 1, len(curves)):
-                xi = self.poly_at(curves[i], d_ref)
-                xj = self.poly_at(curves[j], d_ref)
-                gap = abs(xj - xi)
-                score = abs(gap - want)
+                gap = abs(self.poly_at(curves[j], d_ref) - self.poly_at(curves[i], d_ref))
+                if not (lo <= gap <= hi):
+                    continue
+                # 间距稳定性：任何一处都不能比 d_ref 处小太多或大太多
+                gaps = np.abs(np.array([self.poly_at(curves[j], d) - self.poly_at(curves[i], d)
+                                        for d in ds]))
+                if gaps.min() < gap / ratio_max or gaps.max() > gap * ratio_max:
+                    continue                        # 两条线在收敛/发散 → 不是同一条车道
+                score = abs(gap - self.w_ref)
                 if best is None or score < best[0]:
                     best = (score, i, j, gap)
         if best is None:
             return None
-        score, i, j, gap = best
-
-        # 间距偏差超过容忍度，说明这俩不是同一条车道的两条边
-        if score > want * p["pair_gap_tol"]:
-            return None
-        # 谁在左边
+        _, i, j, gap = best
+        # 宽度估计平滑跟上实测值（限幅在物理范围内）
+        self.w_ref = float(np.clip(
+            self.w_ref + p["lane_width_alpha"] * (gap - self.w_ref), lo, hi))
         xi = self.poly_at(curves[i], d_ref)
         xj = self.poly_at(curves[j], d_ref)
         return (i, j) if xi < xj else (j, i)
@@ -304,16 +362,33 @@ class LaneTracker:
             "mode": 3, "is_lost": True,
             "reject_reason": "鸟瞰图里一个黄像素都没有（没对着赛道/相机没图/阈值太严）",
             "e_m": 0.0, "theta_rad": 0.0, "curvature": 0.0,
-            "lane_width_m": p["lane_width_m"], "quality": 0.0,
-            "n_pts": len(pts),
+            "lane_width_m": self.w_ref, "quality": 0.0,
+            "n_pts": len(pts), "tracking": False,
         }
         if len(pts) < p["min_points_curve"]:
             out["reject_reason"] = (f"黄像素仅 {len(pts)} 个，"
                                     f"少于要求的 {p['min_points_curve']} 个")
             return out
 
+        # ── 时序先验：上一帧的车道在哪，这一帧就只在附近找 ──
+        #   这条赛道有路口、地面箭头、多条并行的黄线，全局搜索经常配错对
+        #   （效果图里出现过 w=0.38 m 的斜穿）。有了上一帧的约束，
+        #   路口也能锁住「我正在走的这条车道」。
+        #   跟踪失败（点太少）就退回全局搜索，不会卡死。
+        pts_search = pts
+        prev = self.prev_pair
+        if prev is not None:
+            d_all = pts[:, 0]
+            near = np.zeros(len(pts), dtype=bool)
+            for c in prev:
+                dist = np.abs(np.polyval(c, d_all - self.d0) - pts[:, 1])
+                near |= dist < p["track_gate_m"]
+            if near.sum() >= p["min_points_curve"]:
+                pts_search = pts[near]
+                out["tracking"] = True
+
         # 顺序 RANSAC：找第一条，剔除它，再找第二条
-        c1, in1 = self.ransac_poly(pts, rng)
+        c1, in1 = self.ransac_poly(pts_search, rng)
         if c1 is None:
             out["reject_reason"] = (f"有 {len(pts)} 个黄像素，"
                                     f"但凑不出连续的线（可能都是噪点/其他黄色物体）")
@@ -324,50 +399,71 @@ class LaneTracker:
         #   如果只按 3 cm 剔除，同一条线的剩余像素会被第二次 RANSAC
         #   当成「另一条线」拟合出来 —— 表现为两条线间距 0.28 m 而不是 0.54 m，
         #   于是配对被拒，退化成单边模式。2026-10-23 从数据里查出来的。
-        dist1 = np.abs(np.polyval(c1, pts[:, 0] - self.d0) - pts[:, 1])
-        rest = pts[dist1 > p["line_half_width_m"]]
-        c2 = None
-        if len(rest) >= p["min_points_curve"]:
-            c2, _ = self.ransac_poly(rest, rng)
+        dx = pts_search[:, 1] - np.polyval(c1, pts_search[:, 0] - self.d0)
+        rest = pts_search[np.abs(dx) > p["line_half_width_m"]]
+        dx = dx[np.abs(dx) > p["line_half_width_m"]]
+
+        # ── 找配对线：只在「距第一条约一个车道宽」的带子里找 ──
+        #   原来是「在剩下的所有点里随便找第二条，再检查间距对不对」。
+        #   路口和地面标线多的时候，随便找到的那条往往不是同一车道的另一条边，
+        #   配对检查才发现已经晚了（实测出现过 w=0.38 m 的斜穿假配对）。
+        #   把约束放到搜索里：两个方向各试一次，各拟合一条候选线。
+        want = self.w_ref
+        band = max(p["partner_band_m"], 0.20 * want)   # 宽车道按比例放宽
+        cands = self._partner_cands(rest, dx, want, band, rng)
+        if not cands:
+            # 兜底：宽度估计可能滞后（刚进更宽的区域），
+            # 就在物理范围内找一条最强的，交给配对判据决定。
+            # 同样必须过 _fit_line 的质量检查，否则又会凭空造线。
+            lo, hi = p["partner_min_m"], p["partner_max_m"]
+            sel = (np.abs(dx) >= lo) & (np.abs(dx) <= hi)
+            c = self._fit_line(rest[sel], rng)
+            if c is not None:
+                cands = [c]
 
         d_ref = p["eval_d_m"]
         d_head = p["heading_d_m"]
 
         # ── 数据支撑范围：拟合只在有点的地方可信，不能凭空调外推 ──
-        inl = pts[in1]
+        inl = pts_search[in1]
         d_lo, d_hi = float(inl[:, 0].min()), float(inl[:, 0].max())
         span = d_hi - d_lo
         out["d_span"] = span
         if span < p["min_span_m"]:
             out.update(reject_reason=f"有效点只跨 {span:.2f}m，太短，拟合不可信")
             return out
-        # ★ 必须在配对之前把评估点夹进数据范围：
-        #   否则配对用 0.6 m 判断间距，宽度却算在夹过的距离上，两者不一致，
-        #   会出现「间距 0.14 m 却判成双边」的情况（2026-10-23 从效果图里发现）。
-        d_ref = min(max(d_ref, d_lo), d_hi)
-        d_head = min(max(d_head, d_lo), d_hi)
+        # 评估点只夹上限，不夹下限。
+        # ★ 为什么允许外推到车的位置：
+        #   e 和 theta 应该在【车所在位置】量，量在车前就有超前。
+        #   R=1.0m 的弯，0.35m 的超前就是 20° —— 表现是「幅度对、时机早」，
+        #   车提前入弯、切内线、再从外侧修回来（2026-10-24 现场观察）。
+        #   拟合段是 0.35~1.45m，二次曲线外推 0.35m 是可接受的。
+        # 配对仍然用夹过的 d_ref（间距必须在有数据的地方算）。
+        d_pair = min(max(d_ref, d_lo), d_hi)
+        d_ref = min(d_ref, d_hi)
+        d_head = min(d_head, d_hi)
 
-        curves = [c1] if c2 is None else [c1, c2]
-        pair = self.pair_curves(curves, d_ref) if len(curves) == 2 else None
+        curves = [c1] + cands
+        pair = self.pair_curves(curves, d_pair) if len(curves) >= 2 else None
 
         if pair is not None:
             iL, iR = pair
             coefL, coefR = curves[iL], curves[iR]
             mode = 0
-            lane_w = abs(self.poly_at(coefR, d_ref) - self.poly_at(coefL, d_ref))
+            lane_w = abs(self.poly_at(coefR, d_pair) - self.poly_at(coefL, d_pair))
         else:
             # 只有一条线：靠"车道宽"推另一条。哪边？看这条线在车轴的哪一侧。
             c = c1
             xc = self.poly_at(c, d_ref)
             if xc < 0:          # 这条线在车的左边 → 它是左线
                 coefL = c
-                coefR = c + np.array([0, 0, p["lane_width_m"]])
+                coefR = c + np.array([0, 0, self.w_ref])
                 mode = 1
             else:               # 在右边 → 右线
                 coefR = c
-                coefL = c - np.array([0, 0, p["lane_width_m"]])
+                coefL = c - np.array([0, 0, self.w_ref])
                 mode = 2
-            lane_w = p["lane_width_m"]
+            lane_w = self.w_ref
 
         mid_coef = (coefL + coefR) / 2
         # 用两条线的平均曲率更稳；单边时就是它自己的曲率
@@ -391,12 +487,37 @@ class LaneTracker:
                                  * min(1.0, span / (self.d_max - self.d_min)))),
         })
 
-        # ── 物理合理性：车不可能离车道中心超过车道半宽 + 一点余量 ──
-        # 这不是"拍脑袋的阈值"，是个几何事实：|e| > 半宽 + 15cm 就意味着已经冲出边界。
-        limit = lane_w / 2 + p["e_margin_m"]
-        if abs(out["e_m"]) > limit:
+        # ── 可信度判定：全部收在这里，对外只输出一个 is_lost ──
+        # 这是架构上的「唯一判定点」。brain_node 不再重复判质量、判跳变，
+        # 只按 is_lost 做状态机滞回。改判定规则只改这一个地方。
+
+        # ★ 时序连续性：车道不可能在相邻两帧之间跳到别处。
+        #   实测日志（2026-10-24 推车过弯）：theta 从 +6° 一帧一帧爬到 +46°，
+        #   delta 跟着打满 25°，车就提前切内线、然后冲出外侧。
+        #   30fps、0.21 m/s 时车每帧只走 7mm，车道中线的横移不可能超过 20cm。
+        #   超过就是拟合跳到另一条车道了，宁可判丢线（保持方向）也不要跟着错。
+        jump = None
+        if self.prev_mid is not None:
+            jump = abs(self.poly_at(mid_coef, d_ref) - self.poly_at(self.prev_mid, d_ref))
+
+        # ★ 航向角也不能一帧翻脸。
+        #   实测（同一份推车日志）：弯道全程只有一条线可配对（mode=2 仅右），
+        #   theta 在 8.28s→8.32s 之间从 +7.6° 直接变成 -24.3°，一帧反向 32°。
+        #   车一帧只走 7mm，航向角物理上不可能这样变 —— 是那条线换成别的了。
+        th_jump = None
+        if self.prev_theta is not None:
+            th_jump = abs(math.degrees(out["theta_rad"] - self.prev_theta))
+
+        limit = min(lane_w / 2 + p["e_margin_m"], p["e_abs_limit_m"])
+        if jump is not None and jump > p["jump_max_m"]:
+            out.update(is_lost=True,
+                       reject_reason=f"车道中线一帧跳了 {jump*100:.0f}cm（> {p['jump_max_m']*100:.0f}cm）")
+        elif th_jump is not None and th_jump > p["theta_jump_deg"]:
+            out.update(is_lost=True,
+                       reject_reason=f"theta 一帧跳了 {th_jump:.0f}°（> {p['theta_jump_deg']:.0f}°）")
+        elif abs(out["e_m"]) > limit:
             out.update(is_lost=True, quality=0.0,
-                       reject_reason=f"e={out['e_m']*100:+.0f}cm > 半宽+余量 {limit*100:.0f}cm")
+                       reject_reason=f"e={out['e_m']*100:+.0f}cm > 允许 {limit*100:.0f}cm")
         elif abs(math.degrees(out["theta_rad"])) > p["theta_limit_deg"]:
             out.update(is_lost=True, quality=0.0,
                        reject_reason=f"theta={math.degrees(out['theta_rad']):+.0f}° 超限")
@@ -404,6 +525,22 @@ class LaneTracker:
             # 弯得比车能转的还急，肯定是拟合跑飞了（几何上不可能）
             out.update(is_lost=True, quality=0.0,
                        reject_reason=f"kappa={out['curvature']:+.1f} 超过车的最小转弯能力")
+        elif out["quality"] < p["quality_min"]:
+            # 质量门限：点数 × 数据跨度都不够，拟合出来的方向是外推的幻想值。
+            # 实测（2026-10-24 日志）：弯道入口 q 掉到 0.38，theta 同时从 +6° 飙到
+            # +46°，纠偏项跟着打满舵 —— 就是「还没进弯方向盘就死了」。
+            # ★ 保留 quality 原值，别清零，调参时要能看到真实数值。
+            out.update(is_lost=True,
+                       reject_reason=f"quality={out['quality']:.2f} < {p['quality_min']:.2f}")
+
+        # ── 更新时序先验 ──
+        #   只在「可信」时更新：双边，或至少点数够多。单边时另一条是推算出来的，
+        #   把它当先验会让下一帧继续沿着推算值漂走，所以单边不更新。
+        self.prev_pair = (coefL, coefR) if (mode == 0 and not out["is_lost"]) else None
+        # 中线/航向先验：跳变被拒之后不要用它更新，否则会一路锁在错误的车道上
+        if not out["is_lost"]:
+            self.prev_mid = mid_coef
+            self.prev_theta = out["theta_rad"]
         return out
 
     # ═══════════════════════════════════════════════════════════

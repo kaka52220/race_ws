@@ -48,15 +48,20 @@ class BrainNode(Node):
         self.declare_parameter("steer_tau_s", 0.08)       # 转向低通时间常数（秒）。画龙就调大，0=关闭
 
         # 控制律
-        self.declare_parameter("stanley_k", 1.5)          # 横向纠偏增益，越大纠得越猛
+        # 横向纠偏增益。★ 2026-10-24 陀螺仪实测标定过：
+        #   set_akm_steering_angle(25) 实际只让前轮转 15.2°，转弯半径 0.53 m。
+        #   k=1.5 时，e=10cm 就要走 R=0.81 m 的弯 —— 在 54cm 宽车道里等于打半舵。
+        #   改 0.7 后：e=5cm → R=3.4m，e=10cm → R=1.7m，e=20cm → R=0.86m。
+        #   觉得还不够柔就继续往 0.5 调；觉得跟弯慢就往 1.0 调。
+        self.declare_parameter("stanley_k", 0.7)
 
         # 速度：linear.x 是归一化 0~1，base_node 乘 100 得到 set_car_run 的百分比。
         # 新固件实测（2026-10-24，落地编码器）：每 1% ≈ 0.0134 m/s，线性、带负载补偿。
         #   speed  8 → 0.106 m/s    speed 12 → 0.161 m/s
         #   speed 10 → 0.138 m/s    speed 15 → 0.208 m/s
         # 所以 max_speed=0.12 → 12% → 0.161 m/s。
-        self.declare_parameter("max_speed", 0.12)         # 全局最高速
-        self.declare_parameter("min_speed", 0.12)         # 转弯时最低速，别停
+        self.declare_parameter("max_speed", 0.21)         # 全局最高速（米/秒）
+        self.declare_parameter("min_speed", 0.21)         # 转弯时最低速（米/秒），别停
         self.declare_parameter("speed_scale", 1.0)        # 一键倍率：0.5 = 全部减半
         self.declare_parameter("a_lat", 0.8)              # 允许的侧向加速度 m/s²
         self.declare_parameter("accel", 0.8)              # 加速度上限
@@ -64,10 +69,21 @@ class BrainNode(Node):
 
         # 安全 / 调试
         self.declare_parameter("track_timeout_s", 0.5)    # 多久没视觉就停车
-        self.declare_parameter("lost_speed", 0.05)        # 丢线时的固定爬行速度（不要用乘法，会指数衰减）
+        self.declare_parameter("lost_speed", 0.07)        # 丢线时的固定爬行速度（不要用乘法，会指数衰减）
         self.declare_parameter("lost_enter_frames", 3)    # 连续丢几帧才进 LOST（滞回，防抖）
         self.declare_parameter("lost_exit_frames", 8)     # 连续好帧几帧才退出 LOST
-        self.declare_parameter("v_stanley_min", 0.50)     # Stanley 分母的固定参考值（固件单位未知，改成常数=纯比例控制）
+        self.declare_parameter("v_stanley_min", 0.50)     # Stanley 分母的速度下限（米/秒）。
+        # 真车才 0.21 m/s，这个 0.5 只是个「固定参考速度」，让纠偏项退化成纯比例控制，
+        # 避免低速时 1/v 把纠偏角放大到 90°（实测出现过 -92.8°）。
+        # e 进入控制律前先夹到这个范围（米）。宽区域（广场/路口）视觉给的 e 可能到 1 米，
+        # 不夹的话纠偏项直接打满舵，等于闭着眼睛拐弯。0.35 m 已超过半个窄车道宽。
+        self.declare_parameter("e_clip_m", 0.35)
+        # 航向角/曲率的一阶低通时间常数（秒）。越大越平滑、响应越慢。
+        # 实测 theta 单帧噪声中位 10°，不滤的话转向一直在抖。
+        self.declare_parameter("heading_tau_s", 0.12)
+
+        self.th_s = None          # 航向角平滑值
+        self.k_s = None           # 曲率平滑值
         self.declare_parameter("dry_run", False)          # true = 只算不发
         self.declare_parameter("control_hz", 50.0)
 
@@ -121,6 +137,8 @@ class BrainNode(Node):
         #   不要写成「每帧把速度乘一个系数」：20ms 一帧乘 0.5，五个周期就归零，
         #   表现为走走停停、速度锯齿，而且 CRUISING↔LOST 来回切。
         #   给一个固定的 lost_speed，配合 enter/exit 帧数滞回，就平稳了。
+        #   ★ 可信度判定（质量、跨度、e/theta/kappa 超限）全部在 vision 做完了，
+        #     这里只看 msg.is_lost，不再重复判 —— 见 06_代码架构与职责边界.md
         if msg.is_lost:
             self.lost_cnt += 1
             self.ok_cnt = 0
@@ -132,7 +150,6 @@ class BrainNode(Node):
         still_lost = self.state == "LOST" and self.ok_cnt < int(g("lost_exit_frames").value)
 
         # ★ max_speed=0 表示「绝对停住，只算方向」——调试前轮用。
-        #   否则 min_speed / lost_speed 会把速度抬起来，车一直转，没法看前轮。
         hold = float(g("max_speed").value) * float(g("speed_scale").value) <= 1e-6
 
         if enter_lost or still_lost:
@@ -153,6 +170,18 @@ class BrainNode(Node):
         th = float(msg.heading_error)
         L = float(g("wheelbase_m").value)
 
+        # ── 航向角/曲率的时序低通 ──
+        #   实测（2026-10-24）：同一帧图只改鸟瞰图深度范围，theta 就会差 10°（中位）、
+        #   最坏 79°。车跑起来每帧都在变，不滤波的话转向一直在抖。
+        #   一阶低通：alpha = dt / tau，dt = 控制周期 20ms。
+        self.th_s = 0.0 if self.th_s is None else self.th_s
+        self.k_s = 0.0 if self.k_s is None else self.k_s
+        a = min(1.0, 0.02 / max(float(g("heading_tau_s").value), 1e-3))
+        self.th_s += a * (th - self.th_s)
+        self.k_s += a * (kappa - self.k_s)
+        th = self.th_s
+        kappa = self.k_s
+
         # ── 速度：按曲率限速（v = sqrt(a_lat / |κ|)）──
         if abs(kappa) > 1e-3:
             v_curve = math.sqrt(float(g("a_lat").value) / abs(kappa))
@@ -171,9 +200,12 @@ class BrainNode(Node):
 
         # ── Stanley 转向 ──
         #   分母给一个速度下限：车快停时 v→0，纠偏角会冲到 90°（实测出现过 -92.8°）。
+        #   e 先夹到 ±e_clip_m：宽区域（广场/路口）视觉给出的 e 可能到 1 米，
+        #   不夹的话纠偏项直接打满舵，等于闭着眼睛拐弯。夹住之后超出部分按最大值处理。
+        e_c = max(-float(g("e_clip_m").value), min(float(g("e_clip_m").value), e))
         steer_ff = math.atan(L * kappa)                      # 曲率前馈
         v_eff = max(v_cmd, float(g("v_stanley_min").value))
-        corr = math.atan(float(g("stanley_k").value) * e / v_eff)
+        corr = math.atan(float(g("stanley_k").value) * e_c / v_eff)
         delta = th - corr + steer_ff + math.radians(float(g("steer_trim_deg").value))
         delta_raw = delta          # 滤波/限幅前的原始转角，只用于日志诊断
 
