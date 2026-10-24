@@ -54,6 +54,10 @@ class BrainNode(Node):
         #   改 0.7 后：e=5cm → R=3.4m，e=10cm → R=1.7m，e=20cm → R=0.86m。
         #   觉得还不够柔就继续往 0.5 调；觉得跟弯慢就往 1.0 调。
         self.declare_parameter("stanley_k", 0.7)
+        # 转向律的权重（0~1）。见下方 on_track 里的说明。
+        #   实测：e 平滑可信、theta 乱跳，所以先只用 e。
+        self.declare_parameter("theta_gain", 0.0)   # 航向角权重
+        self.declare_parameter("kappa_gain", 0.0)   # 曲率前馈权重
 
         # 速度：linear.x 是归一化 0~1，base_node 乘 100 得到 set_car_run 的百分比。
         # 新固件实测（2026-10-24，落地编码器）：每 1% ≈ 0.0134 m/s，线性、带负载补偿。
@@ -198,15 +202,27 @@ class BrainNode(Node):
             v_cmd = max(v_target, self.v_cmd - float(g("decel").value) * 0.02)
         self.v_cmd = v_cmd
 
-        # ── Stanley 转向 ──
-        #   分母给一个速度下限：车快停时 v→0，纠偏角会冲到 90°（实测出现过 -92.8°）。
-        #   e 先夹到 ±e_clip_m：宽区域（广场/路口）视觉给出的 e 可能到 1 米，
-        #   不夹的话纠偏项直接打满舵，等于闭着眼睛拐弯。夹住之后超出部分按最大值处理。
+        # ── 转向律 ──
+        #   delta = theta_gain·θ  −  atan(k·e/v)  +  kappa_gain·atan(L·κ)
+        #
+        #   ★ 2026-10-24 静态扫描的结论：**e 可信，theta 不可信**。
+        #     车摆在车道正中、车头顺着车道，沿弯道取 5 个位置：
+        #         e     : -0.4  -2.4  +6.4  +18.9  +19.8 cm   ← 平滑、单调、合理
+        #         theta : -1.3  +23.2 +41.7  -8.4  -29.1 deg   ← 乱跳、方向都会反
+        #     用 theta 打方向就会「提前切内线、再冲出外侧」，而 theta 一整天没修好。
+        #     所以把 theta 和 kappa 做成权重，默认先关掉，只用横向误差。
+        #
+        #   代价：没有前馈，弯道会滞后一点（等 e 变大了才修）。
+        #   好处：不会因为一个错误的 40° 航向角打满舵。
+        #   等 e 控制跑通之后，可以一点点把 theta_gain 加回来（0.2 / 0.4 ...）。
+        #   分母给速度下限：车快停时 v→0，纠偏角会冲到 90°（实测出现过 -92.8°）。
+        #   e 先夹到 ±e_clip_m：宽区域视觉给出的 e 可能到 1 米，不夹会直接打满舵。
         e_c = max(-float(g("e_clip_m").value), min(float(g("e_clip_m").value), e))
-        steer_ff = math.atan(L * kappa)                      # 曲率前馈
         v_eff = max(v_cmd, float(g("v_stanley_min").value))
         corr = math.atan(float(g("stanley_k").value) * e_c / v_eff)
-        delta = th - corr + steer_ff + math.radians(float(g("steer_trim_deg").value))
+        steer_ff = math.atan(L * kappa) * float(g("kappa_gain").value)
+        delta = (float(g("theta_gain").value) * th - corr + steer_ff
+                 + math.radians(float(g("steer_trim_deg").value)))
         delta_raw = delta          # 滤波/限幅前的原始转角，只用于日志诊断
 
         # 限幅

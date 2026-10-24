@@ -363,7 +363,7 @@ class LaneTracker:
             "reject_reason": "鸟瞰图里一个黄像素都没有（没对着赛道/相机没图/阈值太严）",
             "e_m": 0.0, "theta_rad": 0.0, "curvature": 0.0,
             "lane_width_m": self.w_ref, "quality": 0.0,
-            "n_pts": len(pts), "tracking": False,
+            "n_pts": len(pts), "tracking": False, "n_lines": 0, "line_x_m": None,
         }
         if len(pts) < p["min_points_curve"]:
             out["reject_reason"] = (f"黄像素仅 {len(pts)} 个，"
@@ -464,6 +464,11 @@ class LaneTracker:
                 coefL = c - np.array([0, 0, self.w_ref])
                 mode = 2
             lane_w = self.w_ref
+            # 诊断用：单边模式下，这条线在车心横向多远。
+            # 车在车道里时，自己车道的边界离车心不可能超过「半车道宽+余量」。
+            # 超过就说明跟的是别的赛道的线，theta 也不可信。
+            out["line_x_m"] = float(xc)
+        out["n_lines"] = 1 + len(cands)
 
         mid_coef = (coefL + coefR) / 2
         # 用两条线的平均曲率更稳；单边时就是它自己的曲率
