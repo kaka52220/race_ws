@@ -52,18 +52,24 @@ STRIPE_MAX_CV = 0.35    # 各段宽度的变异系数上限（斑马线 ≈0.00�
 STRIPE_MIN_RUN_PX = 9   # 段宽小于这个的当噪声丢掉（缩到 320 宽后）
 STRIPE_MIN_COV = 0.25   # 这一行白像素占比低于这个不参与判定
 STRIPE_MAX_COV = 0.95   # 整行全白（贴脸）也排除
+# ★ 必须有多行满足，不能只靠一行。
+#   实测：斑马线 16~37 行满足，起点线 0 行，负样本/挡板 0~1 行。
+#   只要求「任意一行」时，单行噪声就能骗过去 —— 现场实测起点线误停车就是这个原因。
+STRIPE_MIN_ROWS = 3
 
 # 为了省 CPU，先把帧缩到 320x180 再算
 SMALL = (320, 180)
 
 
-def _stripe_ok(mask):
-    """这一帧是不是「等宽平行条纹」（斑马线）。
+def _stripe_rows(mask):
+    """这一帧有多少行是「等宽平行条纹」。
 
     mask: uint8 0/1，ROI 内的白像素图。
-    逐行统计白像素被分成几段、各段宽度是否接近；
-    任意一行满足「段数 >= 4 且 宽度 CV <= 0.35」就判为条纹。
+    逐行统计白像素被分成几段、各段宽度是否接近。
+    斑马线实测 16~37 行满足，起点线 0 行，负样本 0~1 行 —— 差别很大，
+    所以用「行数」而不是「有没有一行」来判定，抗单行噪声。
     """
+    n_ok = 0
     for r in range(mask.shape[0]):
         row = mask[r]
         cov = float(row.mean())
@@ -79,12 +85,12 @@ def _stripe_ok(mask):
             continue
         mean_w = float(np.mean(widths))
         if mean_w > 0 and float(np.std(widths)) / mean_w <= STRIPE_MAX_CV:
-            return True
-    return False
+            n_ok += 1
+    return n_ok
 
 
 def crosswalk_metrics(frame, small=SMALL):
-    """返回 (面积百分比, 是否等宽条纹)。面积判距离，条纹判身份。"""
+    """返回 (面积百分比, 满足条纹条件的行数)。面积判距离，行数判身份。"""
     s = cv2.resize(frame, small, interpolation=cv2.INTER_AREA)
     h, w = s.shape[:2]
     hsv = cv2.cvtColor(s, cv2.COLOR_BGR2HSV)
@@ -94,22 +100,22 @@ def crosswalk_metrics(frame, small=SMALL):
     # 过曝保护：地面 V 中位到 215 说明白条和地面全饱和、分不开。
     # 这时返回 0（不触发），比乱给一个数安全 —— 实测过曝时地面能到 233。
     if p50 > 215.0:
-        return 0.0, False
+        return 0.0, 0
     thr = min(250.0, max(float(FLOOR_MIN_V), p50 + DELTA_V))
     mask = ((v > thr) & (roi[:, :, 1] < S_MAX)).astype(np.uint8)
     area = 100.0 * float(mask.mean())
     if area < 1.0:                       # 几乎没有白的，不用数条纹了
-        return area, False
-    return area, _stripe_ok(mask)
+        return area, 0
+    return area, _stripe_rows(mask)
 
 
 def crosswalk_score(frame, small=SMALL):
     """返回 0~100。0 = 不是斑马线；>0 = 白条面积百分比（越大越近）。
 
-    起点线是一整条白带、不是等宽条纹，会返回 0 —— 所以车在起点不会停。
+    起点线是一整条白带、不是等宽条纹（0 行满足），会返回 0 —— 起点不会停车。
     """
-    area, stripe = crosswalk_metrics(frame, small)
-    return area if stripe else 0.0
+    area, n_rows = crosswalk_metrics(frame, small)
+    return area if n_rows >= STRIPE_MIN_ROWS else 0.0
 
 
 # ── 红灯（只做确认，不做触发）──

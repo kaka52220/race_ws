@@ -75,10 +75,10 @@ class BrainNode(Node):
         #   speed  8 → 0.106 m/s    speed 12 → 0.161 m/s
         #   speed 10 → 0.138 m/s    speed 15 → 0.208 m/s
         # 所以 max_speed=0.12 → 12% → 0.161 m/s。
-        self.declare_parameter("max_speed", 0.40)         # 全局最高速（米/秒）
-        self.declare_parameter("min_speed", 0.15)         # 转弯时最低速（米/秒），别停
+        self.declare_parameter("max_speed", 0.60)         # 全局最高速（米/秒）
+        self.declare_parameter("min_speed", 0.20)         # 转弯时最低速（米/秒），别停
         self.declare_parameter("speed_scale", 1.0)        # 一键倍率：0.5 = 全部减半
-        self.declare_parameter("a_lat", 0.15)
+        self.declare_parameter("a_lat", 0.17)
         # ★ 0.15 才有弯道减速：v = √(a_lat/κ)。
         #   κ=1.5 时 a_lat=0.15 → v=0.32；若取 0.8 → v=0.73 相当于不减速，
         #   全速冲进弯会「转不过来」。这个参数是弯道能不能过的关键。              # 允许的侧向加速度 m/s²
@@ -97,11 +97,17 @@ class BrainNode(Node):
         self.declare_parameter("lost_hold_min_n", 1)      # 至少几帧历史才沿用。1 = 只要跑过一帧就不回正
         self.declare_parameter("lost_enter_frames", 3)    # 连续丢几帧才进 LOST（滞回，防抖）
         self.declare_parameter("lost_exit_frames", 8)     # 连续好帧几帧才退出 LOST
-        self.declare_parameter("v_stanley_min", 0.50)     # Stanley 分母的速度下限（米/秒）。
+        self.declare_parameter("v_stanley_min", 0.30)     # Stanley 分母的速度下限（米/秒）。
         # 真车才 0.21 m/s，这个 0.5 只是个「固定参考速度」，让纠偏项退化成纯比例控制，
         # 避免低速时 1/v 把纠偏角放大到 90°（实测出现过 -92.8°）。
         # e 进入控制律前先夹到这个范围（米）。宽区域（广场/路口）视觉给的 e 可能到 1 米，
         # 不夹的话纠偏项直接打满舵，等于闭着眼睛拐弯。0.35 m 已超过半个窄车道宽。
+        self.declare_parameter("e_jump_max_m", 0.06)
+        # ★ 单帧跳变保护：视觉 30Hz，一个周期（33ms）车最多走 1.3cm，
+        #   e 一帧跳超过 6cm 必定是锁错线。实测出弯时出现过 -0.053 → -0.706
+        #   → -0.005 → -0.412 这种乱跳，不挡的话方向盘会来回甩，把车甩出赛道。
+        self.declare_parameter("e_jump_frames", 5)
+        #   连续这么多帧都跳，说明是真位移（车真的偏了），就接受
         self.declare_parameter("e_clip_m", 0.20)
         # ★ 车道总宽才 0.54m，|e|>0.27 说明车已经在赛道外了。
         #   0.35 时纠偏角 = atan(0.7×0.35/0.5) = 26° → 打满舵。
@@ -120,6 +126,11 @@ class BrainNode(Node):
         #   分数是"地面极亮面积百分比"，越大 = 离斑马线越近。
         #   实测：>=8% 约 0.7 米内；负样本 207 张 / 挡板 143 张零误检。
         self.declare_parameter("crosswalk_trigger", 8.0)   # 超过这个分数就停车
+        # ★ 先减速再停：高速（0.6）冲过来时刹车距离不够，会停在斑马线上。
+        #   分数到 crosswalk_slow_trigger 就先把速度压到 crosswalk_slow_speed，
+        #   等真到 crosswalk_trigger 再停 —— 这样停得准，又不用把停车阈值降太低。
+        self.declare_parameter("crosswalk_slow_trigger", 3.0)
+        self.declare_parameter("crosswalk_slow_speed", 0.25)
         self.declare_parameter("crosswalk_stop_s", 3.0)    # 停几秒（规则要求 3s）
         self.declare_parameter("crosswalk_rearm", 0.6)     # 分数掉到触发值的这个比例以下，才允许下次再停
         # 冷却：停完之后这么多秒内不再触发。防止分数在阈值附近抖动时
@@ -141,6 +152,8 @@ class BrainNode(Node):
         self.cw_stop_until = 0.0    # 停车截止时刻
         self.cw_armed = True        # 是否允许触发（过一个斑马线只停一次）
         self.cw_done_at = 0.0       # 上次停车结束的时刻（冷却用）
+        self.e_prev = None          # 上一帧采信的 e（跳变保护用）
+        self.e_jump_cnt = 0         # 连续跳变帧数
         # 最近若干帧的转向角，丢线时沿用（「往哪转往哪转」，不回正）
         self.steer_hist = deque(maxlen=15)
         self.ok_cnt = 0             # 连续正常帧数（滞回用）
@@ -172,6 +185,9 @@ class BrainNode(Node):
         g = self.get_parameter
         now = self.get_clock().now().nanoseconds / 1e9
         v_max = float(g("max_speed").value) * float(g("speed_scale").value)
+        # 斑马线前预减速：分数够了就先压速，别等冲过头再刹
+        if self.cw >= float(g("crosswalk_slow_trigger").value):
+            v_max = min(v_max, float(g("crosswalk_slow_speed").value))
 
         # ── 视觉超时：这是最后一道保险，必须最先判 ──
         if self.last is None or (now - self.last_time) > float(g("track_timeout_s").value):
@@ -257,6 +273,19 @@ class BrainNode(Node):
         kappa = float(msg.curvature)
         e = float(msg.lateral_error)
         th = float(msg.heading_error)
+
+        # ── e 单帧跳变保护 ──
+        #   33ms 内车最多走 1.3cm，e 跳超过 e_jump_max_m 说明视觉锁错线了。
+        #   这一帧沿用上一帧的值；但连续 e_jump_frames 帧都在跳，说明是真的偏了，接受。
+        if self.e_prev is not None and abs(e - self.e_prev) > float(g("e_jump_max_m").value):
+            self.e_jump_cnt += 1
+            if self.e_jump_cnt < int(g("e_jump_frames").value):
+                e = self.e_prev
+            else:
+                self.e_jump_cnt = 0          # 持续跳 = 真位移，接受
+        else:
+            self.e_jump_cnt = 0
+        self.e_prev = e
         L = float(g("wheelbase_m").value)
 
         # ── 航向角/曲率的时序低通 ──
