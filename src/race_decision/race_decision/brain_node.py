@@ -60,6 +60,9 @@ class BrainNode(Node):
         # 转向律的权重（0~1）。见下方 on_track 里的说明。
         #   实测：e 平滑可信、theta 乱跳，所以先只用 e。
         self.declare_parameter("theta_gain", 0.3)   # 航向角权重。
+        # θ 先夹到 ±这个角度再乘 theta_gain。
+        # 实测日志里 θ 会跳到 ±71°，0.3×71 = 21° 的野值。
+        self.declare_parameter("theta_clip_deg", 30.0)
         #   ★ 2026-10-24 调通的值：0.3。进弯靠它提前打方向。
         #     设 0 会明显「进弯滞后」（少了 0.3×θ 这一项前馈）。
         self.declare_parameter("kappa_gain", 0.5)   # 曲率前馈权重。
@@ -98,7 +101,10 @@ class BrainNode(Node):
         # 避免低速时 1/v 把纠偏角放大到 90°（实测出现过 -92.8°）。
         # e 进入控制律前先夹到这个范围（米）。宽区域（广场/路口）视觉给的 e 可能到 1 米，
         # 不夹的话纠偏项直接打满舵，等于闭着眼睛拐弯。0.35 m 已超过半个窄车道宽。
-        self.declare_parameter("e_clip_m", 0.35)
+        self.declare_parameter("e_clip_m", 0.20)
+        # ★ 车道总宽才 0.54m，|e|>0.27 说明车已经在赛道外了。
+        #   0.35 时纠偏角 = atan(0.7×0.35/0.5) = 26° → 打满舵。
+        #   实测日志里出现过 e=+86cm 的野值，按 0.35 算直接甩出赛道。
         # 航向角/曲率的一阶低通时间常数（秒）。越大越平滑、响应越慢。
         # 实测 theta 单帧噪声中位 10°，不滤的话转向一直在抖。
         self.declare_parameter("heading_tau_s", 0.12)
@@ -294,10 +300,13 @@ class BrainNode(Node):
         #   分母给速度下限：车快停时 v→0，纠偏角会冲到 90°（实测出现过 -92.8°）。
         #   e 先夹到 ±e_clip_m：宽区域视觉给出的 e 可能到 1 米，不夹会直接打满舵。
         e_c = max(-float(g("e_clip_m").value), min(float(g("e_clip_m").value), e))
+        # θ 也夹一下：视觉偶尔给出 ±70° 的野值，不限幅就是 0.3×70=21° 的方向突变
+        th_max = math.radians(float(g("theta_clip_deg").value))
+        th_c = max(-th_max, min(th_max, th))
         v_eff = max(v_cmd, float(g("v_stanley_min").value))
         corr = math.atan(float(g("stanley_k").value) * e_c / v_eff)
         steer_ff = math.atan(L * kappa) * float(g("kappa_gain").value)
-        delta = (float(g("theta_gain").value) * th - corr + steer_ff
+        delta = (float(g("theta_gain").value) * th_c - corr + steer_ff
                  + math.radians(float(g("steer_trim_deg").value)))
         delta_raw = delta          # 滤波/限幅前的原始转角，只用于日志诊断
 
