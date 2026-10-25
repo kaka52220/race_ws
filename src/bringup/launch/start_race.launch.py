@@ -32,6 +32,8 @@ def generate_launch_description():
                               description="最高速，米/秒。每 1% ≈ 0.0134 m/s：0.21=16%，0.30=22%"),
         DeclareLaunchArgument("speed_scale", default_value="1.0"),
         DeclareLaunchArgument("publish_debug", default_value="true"),
+        DeclareLaunchArgument("enable_detect", default_value="true",
+                              description="是否起 NPU 挡板检测节点"),
         DeclareLaunchArgument("publish_crosswalk", default_value="true",
                               description="视觉是否发 /crosswalk（测试时可关掉，自己灌假值）"),
         DeclareLaunchArgument("base_driver", default_value="true",
@@ -84,6 +86,20 @@ def generate_launch_description():
         respawn=True, respawn_delay=1.0,
     )
 
+    # ②' NPU 挡板检测：订阅同一路图像，发 /detections
+    #    单独一个进程，不和 vision_node 抢 CPU（推理 11.7ms + 循迹 13ms 串起来会掉帧）
+    detect = Node(
+        package="vision_perception",
+        executable="detect_node",
+        name="detect_node",
+        output="screen",
+        condition=IfCondition(LaunchConfiguration("enable_detect")),
+        parameters=[{
+            "detect_hz": 15.0,
+        }],
+        respawn=True, respawn_delay=2.0,
+    )
+
     # ③ 大脑：订阅 /track，发 /cmd_vel
     brain = Node(
         package="race_decision",
@@ -113,5 +129,5 @@ def generate_launch_description():
 
     return LaunchDescription(args + [
         LogInfo(msg="=== 任务二发车 ==="),
-        camera, vision, brain, base,
+        camera, vision, detect, brain, base,
     ])

@@ -24,6 +24,7 @@ setup(
     entry_points={
         "console_scripts": [
             "vision_node = vision_perception.vision_node:main",
+            "detect_node = vision_perception.detect_node:main",
         ],
     },
 )
