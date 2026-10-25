@@ -96,6 +96,9 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration("enable_detect")),
         parameters=[{
             "detect_hz": 15.0,
+            # 复用 publish_debug：发 /debug/detect_image（画了框的图，5 Hz）
+            "publish_debug": ParameterValue(
+                LaunchConfiguration("publish_debug"), value_type=bool),
         }],
         respawn=True, respawn_delay=2.0,
     )

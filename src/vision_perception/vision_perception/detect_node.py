@@ -70,7 +70,16 @@ class DetectNode(Node):
         self.declare_parameter("hit_frames", 3)          # 最近 window 帧里至少几帧检出才算真
         self.declare_parameter("window_frames", 5)
         self.declare_parameter("min_box_h", 0.04)        # 框高占画面比例下限，滤掉远处小噪点
-        self.declare_parameter("publish_empty", True)    # 没检出也发空消息（让大脑知道"这一帧看过了"）
+        self.declare_parameter("publish_empty", True)   # 没检出也发空消息
+        self.declare_parameter("publish_debug", False)   # 发布画了框的调试图
+        self.declare_parameter("debug_hz", 5.0)
+        # ★ 挡板真实高度（米）。距离 = f × H / 框像素高。
+        #   实测：底边反投在 0.8m 外就废了（1.5m 报成 4.4m），因为靠近地平线后
+        #   1 像素 = 9cm；同样 1.5m，框高度模型 1 像素只差 1.3cm，且不受地面反光影响。
+        self.declare_parameter("barrier_h_m", 0.40)
+        # 线性修正：真实距离 = dist_a × 上式 + dist_b（默认不修正，用卷尺标定后再填）
+        self.declare_parameter("dist_a", 1.0)
+        self.declare_parameter("dist_b", 0.0)
 
         if RKNNLite is None:
             self.get_logger().error("没有 rknnlite，装 rknn-toolkit-lite2")
@@ -86,6 +95,9 @@ class DetectNode(Node):
 
         self.bridge = CvBridge()
         self.pub = self.create_publisher(Detections, "/detections", 10)
+        self.pub_dbg = (self.create_publisher(Image, "/debug/detect_image", 2)
+                        if self.get_parameter("publish_debug").value else None)
+        self.last_dbg = 0.0
         self.sub = self.create_subscription(
             Image, self.get_parameter("image_topic").value, self.on_image, 2)
 
@@ -197,12 +209,41 @@ class DetectNode(Node):
                 d.cy = (y1 + y2) / 2.0 / h_img
                 d.w = (x2 - x1) / w_img
                 d.h = (y2 - y1) / h_img
-                d.dist_m = self._ground_dist(y2, h_img)
+                # ── 距离：两个模型分工，正好互补 ──
+                #   框完整   → 框高度 d = f·H/h_px
+                #              远处准；近距离挡板顶部会超出画面上沿，框被裁，就不准了
+                #   顶部被裁 → 底边反投 d = f·h/(row-地平线)
+                #              近距离准（0.4~0.7m 实测误差 <2%）；远处接近地平线后
+                #              1 像素=9cm，1.5m 能报成 4.4m，所以远处绝不能用它
+                h_px = y2 - y1
+                clipped_top = y1 <= 1.0
+                if clipped_top:
+                    raw_d = self._ground_dist(y2, h_img)
+                elif h_px > 12:
+                    raw_d = CAM_F * float(self.get_parameter("barrier_h_m").value) / h_px
+                else:
+                    raw_d = -1.0
+                d.dist_m = (raw_d * float(self.get_parameter("dist_a").value)
+                            + float(self.get_parameter("dist_b").value)) if raw_d > 0 else -1.0
                 d.bearing_rad = 0.0
                 d.color_state = Detection.COLOR_UNKNOWN
                 m.items.append(d)
         elif not self.get_parameter("publish_empty").value:
             return
+
+        # 调试图：把框画出来，看框有没有被图像边界截断
+        if self.pub_dbg is not None:
+            now2 = self.get_clock().now().nanoseconds / 1e9
+            if now2 - self.last_dbg > 1.0 / max(float(self.get_parameter("debug_hz").value), 0.5):
+                self.last_dbg = now2
+                vis = frame.copy()
+                for x1, y1, x2, y2, sc in dets:
+                    cv2.rectangle(vis, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 3)
+                    cv2.putText(vis, f"{y2-y1:.0f}px", (int(x1), max(20, int(y1) - 8)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                cv2.putText(vis, f"n={len(dets)}", (10, 34),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+                self.pub_dbg.publish(self.bridge.cv2_to_imgmsg(vis, "bgr8"))
 
         self.pub.publish(m)
 

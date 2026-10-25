@@ -33,8 +33,8 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Float32
-from custom_msgs.msg import TrackInfo
+from std_msgs.msg import Float32, String
+from custom_msgs.msg import TrackInfo, Detections
 
 
 class BrainNode(Node):
@@ -108,6 +108,10 @@ class BrainNode(Node):
         #   → -0.005 → -0.412 这种乱跳，不挡的话方向盘会来回甩，把车甩出赛道。
         self.declare_parameter("e_jump_frames", 5)
         #   连续这么多帧都跳，说明是真位移（车真的偏了），就接受
+        # ★ 横向偏置：车在弯里系统性偏右（稳态误差），用这个把目标点往左挪。
+        #   e_use = e - e_bias_m。正值 = 让车往左走。
+        #   调法：车跑直道，看它偏哪边；弯道里也偏右就加到 0.03~0.06。
+        self.declare_parameter("e_bias_m", 0.0)
         self.declare_parameter("e_clip_m", 0.20)
         # ★ 车道总宽才 0.54m，|e|>0.27 说明车已经在赛道外了。
         #   0.35 时纠偏角 = atan(0.7×0.35/0.5) = 26° → 打满舵。
@@ -129,6 +133,46 @@ class BrainNode(Node):
         # ★ 先减速再停：高速（0.6）冲过来时刹车距离不够，会停在斑马线上。
         #   分数到 crosswalk_slow_trigger 就先把速度压到 crosswalk_slow_speed，
         #   等真到 crosswalk_trigger 再停 —— 这样停得准，又不用把停车阈值降太低。
+        # ── 挡板绕行（detect_node 发 /detections，见 detect_node.py）──
+        # 赛道顺序是固定的：斑马线 → 挡板 → 弯道 …
+        # 过完斑马线后这段时间内不再采信 /crosswalk，避免在挡板区误停。
+        # ★ 刚上电时车停在起点/挡板区，周围的白色地面、起点线、斑马线残影
+        #   会让 /crosswalk 误报，一触发就固定停 3 秒，白白把距离吃掉。
+        #   起步后这段时间内完全不采信 /crosswalk。
+        self.declare_parameter("cw_block_dist_m", 1.5)   # 近处有挡板就不看斑马线
+
+        self.declare_parameter("avoid_enable", True)
+        self.declare_parameter("avoid_dist_m", 0.80)      # 多远开始绕
+        self.declare_parameter("bh_turn_m", 0.20)        # 挡板在我方车道内时固定左偏量
+        # ★ 挡板 1 和挡板 2 的唯一稳定区别是画面横向位置 cx：
+        #     挡板1（左）：cx ≤ 0.17，随车靠近一路往画面左边缘跑出去
+        #     挡板2（中）：cx 0.29 → 0.67，随车靠近往右跑（说明车从它左边过）
+        #   实测 rel/lat/dist 在两者间都重叠（挡板1 rel=-0.09~-0.31，
+        #   挡板2 rel=-0.00~-0.06），只有 cx 完全不重叠，所以用 cx 做判据。
+        self.declare_parameter("cx_gate", 0.23)          # cx 大于它才认为是挡板2
+        self.declare_parameter("avoid_clear_m", 0.30)
+        # ★ 挡板区不看视觉的 e。视觉把车道宽当固定 0.455，而这里是 0.90，
+        #   所以 e 天生偏右约 22cm，拿它做控制必然一头对一头错。
+        #   改成直接用「挡板到车头中线的横向距离」——探测器量的，米制，与车道宽无关。
+        #   要求：挡板中心与车头中线至少留 avoid_clear_m（挡板半宽 20 + 车半宽 8.4，取 30）。
+        self.declare_parameter("avoid_offset_m", 0.22)    # 旧的偏移量，保留兼容
+        self.declare_parameter("avoid_clamp_max", 0.36)
+        # ★ 赛道有**两种宽度**：窄段 0.54m、挡板那段加宽到 0.90m。
+        #   固定上限要么窄区出线、要么宽区绕不开。所以用视觉给的
+        #   lane_width 动态算：上限 = 车道宽/2 − 车半宽(0.084) − 余量(0.02)
+        #       0.54 → ±0.166      0.90 → ±0.346
+        #   这个参数只作为绝对上限（车道宽测不出来时的兜底）。
+        self.declare_parameter("avoid_sign", 1.0)         # 绕反了就改 -1
+        self.declare_parameter("avoid_hold_s", 0.15)      # 目标消失后保持多久
+        # ★ 连续绕桩：第 1 块在左、第 2 块在右，第 1 块刚对齐车身时
+        #   第 2 块只剩 0.6m。如果死盯最近的那块，会一直让第 1 块，
+        #   等它过去第 2 块已经来不及。所以：贴到车身侧边就不再理它。
+        # ★ 相机是歪着装的（lane_params 里 yaw_deg=9.0，向右偏 9°），
+        #   所以「图像中心」不等于「车头正前方」。直接用 cx 判断左右会偏
+        #   约 9°（1 米处约 16cm），实测会导致绕错方向。
+        #   正确做法：把 cx 换算成米制横向距离再判断。
+        self.declare_parameter("cam_yaw_deg", 9.0)      # 相机相对车头偏航，正=向右
+        self.declare_parameter("cam_hfov_deg", 99.5)    # 水平视场角
         self.declare_parameter("crosswalk_slow_trigger", 3.0)
         self.declare_parameter("crosswalk_slow_speed", 0.25)
         self.declare_parameter("crosswalk_stop_s", 3.0)    # 停几秒（规则要求 3s）
@@ -140,6 +184,10 @@ class BrainNode(Node):
         self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.sub = self.create_subscription(TrackInfo, "/track", self.on_track, 10)
         self.create_subscription(Float32, "/crosswalk", self.on_crosswalk, 10)
+        self.create_subscription(Detections, "/detections", self.on_detections, 10)
+        # 把挡板判定的真实结果发出来，推流工具直接显示，避免两边逻辑不一致
+        self.pub_state = self.create_publisher(String, "/barrier_state", 10)
+        self._state_msg = String()
 
         self.last = None            # 最近一次的 TrackInfo
         self.last_time = 0.0
@@ -152,6 +200,11 @@ class BrainNode(Node):
         self.cw_stop_until = 0.0    # 停车截止时刻
         self.cw_armed = True        # 是否允许触发（过一个斑马线只停一次）
         self.cw_done_at = 0.0       # 上次停车结束的时刻（冷却用）
+
+        self.det_items = []         # 最新的挡板检测列表
+        self.det_time = 0.0         # 收到检测的时刻
+        self.avoid_e = 0.0          # 上一次算出的横向目标
+        self.avoid_last = 0.0       # 最近一次看到目标障碍的时刻
         self.e_prev = None          # 上一帧采信的 e（跳变保护用）
         self.e_jump_cnt = 0         # 连续跳变帧数
         # 最近若干帧的转向角，丢线时沿用（「往哪转往哪转」，不回正）
@@ -177,6 +230,17 @@ class BrainNode(Node):
         else:
             self.n_ok += 1
 
+        self.get_logger().info(
+            "避障开关 avoid_enable=%s  dist=%.2f  turn=%.2f  cx_gate=%.2f"
+            % (bool(self.get_parameter("avoid_enable").value),
+               float(self.get_parameter("avoid_dist_m").value),
+               float(self.get_parameter("bh_turn_m").value),
+               float(self.get_parameter("cx_gate").value)))
+
+    def on_detections(self, msg):
+        self.det_items = list(msg.items)
+        self.det_time = self.get_clock().now().nanoseconds / 1e9
+
     def on_crosswalk(self, msg):
         self.cw = float(msg.data)
 
@@ -186,7 +250,11 @@ class BrainNode(Node):
         now = self.get_clock().now().nanoseconds / 1e9
         v_max = float(g("max_speed").value) * float(g("speed_scale").value)
         # 斑马线前预减速：分数够了就先压速，别等冲过头再刹
-        if self.cw >= float(g("crosswalk_slow_trigger").value):
+        # 近处有挡板 = 在挡板区 = 不可能是斑马线（两区不重叠）
+        _blk = float(g("cw_block_dist_m").value)
+        cw_ok = not any(it.class_id == 2 and 0.0 < it.dist_m < _blk
+                        for it in self.det_items)
+        if self.cw >= float(g("crosswalk_slow_trigger").value) and cw_ok:
             v_max = min(v_max, float(g("crosswalk_slow_speed").value))
 
         # ── 视觉超时：这是最后一道保险，必须最先判 ──
@@ -203,7 +271,7 @@ class BrainNode(Node):
         #   否则停完 3 秒会立刻再触发一次，车就卡在斑马线不动了。
         trig = float(g("crosswalk_trigger").value)
         cool = float(g("crosswalk_cooldown_s").value)
-        if self.cw >= trig and self.cw_armed and now >= self.cw_done_at + cool:
+        if self.cw >= trig and self.cw_armed and cw_ok and now >= self.cw_done_at + cool:
             self.cw_stop_until = now + float(g("crosswalk_stop_s").value)
             self.cw_armed = False
             self.get_logger().warn(
@@ -331,7 +399,67 @@ class BrainNode(Node):
         #   等 e 控制跑通之后，可以一点点把 theta_gain 加回来（0.2 / 0.4 ...）。
         #   分母给速度下限：车快停时 v→0，纠偏角会冲到 90°（实测出现过 -92.8°）。
         #   e 先夹到 ±e_clip_m：宽区域视觉给出的 e 可能到 1 米，不夹会直接打满舵。
-        e_c = max(-float(g("e_clip_m").value), min(float(g("e_clip_m").value), e))
+        # ── 挡板绕行：把目标点挪到挡板另一侧 ──
+        #   只改这里用的 e，不改上面的滤波/跳变保护逻辑。
+        e_use = e - float(g("e_bias_m").value)   # 系统性偏置修正
+        if bool(g("avoid_enable").value):
+            now3 = now
+            # ── 挡板：只处理「落在拟合车道内」的那块，一律往左 ──
+            #   判据用米制，不碰画面坐标：
+            #       e   = 车 − 车道中心       （左正，视觉给）
+            #       lat = 挡板 − 车           （右正，相机几何算）
+            #       rel = lat − e = 挡板 − 车道中心
+            #   挡板在拟合线内 ⟺ |rel| < 半车道宽。
+            #   视觉在挡板区会把车道宽报窄（0.47~0.90 跳），所以取一个下限，
+            #   否则窄报时会把真正挡路的那块误判成"线外"。
+            dmax = float(g("avoid_dist_m").value)
+            hfov = float(g("cam_hfov_deg").value)
+            yaw0 = float(g("cam_yaw_deg").value)
+            # 只看画面横向位置：靠左边的就是挡板1，不管它
+            cx_gate = float(g("cx_gate").value)
+            tgt = None
+            tgt_rel = 0.0
+            for it in self.det_items:
+                if it.class_id != 2:                      # 2 = CLASS_BARRIER
+                    continue
+                if it.dist_m <= 0.0 or it.dist_m > dmax:
+                    continue
+                lat_i = it.dist_m * math.tan(
+                    math.radians((it.cx - 0.5) * hfov + yaw0))
+                rel_i = lat_i - e
+                keep = it.cx > cx_gate
+                self.get_logger().info(
+                    "[挡板检查] cx=%.2f d=%.2f lat=%+.2f rel=%+.2f -> %s"
+                    % (it.cx, it.dist_m, lat_i, rel_i,
+                       "管" if keep else "不管"),
+                    throttle_duration_sec=1.0)
+                if not keep:
+                    self._state_msg.data = ("SKIP  cx=%.2f d=%.2f rel=%+.2f"
+                                            % (it.cx, it.dist_m, rel_i))
+                    self.pub_state.publish(self._state_msg)
+                    continue                              # 挡板1 → 不管
+                if tgt is None or it.dist_m < tgt.dist_m:
+                    tgt, tgt_rel = it, rel_i
+
+            if not any(it.class_id == 2 for it in self.det_items):
+                self._state_msg.data = "NONE"
+                self.pub_state.publish(self._state_msg)
+
+            if tgt is not None:
+                # 压在我们要走的通道里 → 固定往左让
+                e_use = -float(g("bh_turn_m").value)
+                self.avoid_e = e_use
+                self._state_msg.data = ("AVOID cx=%.2f d=%.2f rel=%+.2f "
+                                        "e_use=%+.3f (LEFT)"
+                                        % (tgt.cx, tgt.dist_m, tgt_rel, e_use))
+                self.pub_state.publish(self._state_msg)
+                self.get_logger().info(
+                    "[挡板] cx=%.2f dist=%.2fm rel=%+.2fm -> 往左 e_use%+.3f"
+                    % (tgt.cx, tgt.dist_m, tgt_rel, e_use),
+                    throttle_duration_sec=1.0)
+                self.avoid_e = e_use        # 缓存，供近距离失效时沿用
+
+        e_c = max(-float(g("e_clip_m").value), min(float(g("e_clip_m").value), e_use))
         # θ 也夹一下：视觉偶尔给出 ±70° 的野值，不限幅就是 0.3×70=21° 的方向突变
         th_max = math.radians(float(g("theta_clip_deg").value))
         th_c = max(-th_max, min(th_max, th))
