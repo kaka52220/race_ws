@@ -48,7 +48,8 @@ class BrainNode(Node):
         self.declare_parameter("steer_trim_deg", 0.0)     # 直线跑偏时调这个
         self.declare_parameter("steer_rate_deg_per_s", 200.0)  # 舵机变化率上限
         self.declare_parameter("steer_sign", 1.0)         # 方向翻转。★ 2026-10-23 静态实测：车偏左时前轮应指车道中心；设为 -1 时指外侧 → 正确的就是 +1
-        self.declare_parameter("steer_tau_s", 0.08)       # 转向低通时间常数（秒）。画龙就调大，0=关闭
+        self.declare_parameter("steer_tau_s", 0.05)
+        # ★ 实测 0.08 时输出滞后明显，0.05 更好。再小方向会抖。       # 转向低通时间常数（秒）。画龙就调大，0=关闭
 
         # 控制律
         # 横向纠偏增益。★ 2026-10-24 陀螺仪实测标定过：
@@ -107,7 +108,9 @@ class BrainNode(Node):
         #   实测日志里出现过 e=+86cm 的野值，按 0.35 算直接甩出赛道。
         # 航向角/曲率的一阶低通时间常数（秒）。越大越平滑、响应越慢。
         # 实测 theta 单帧噪声中位 10°，不滤的话转向一直在抖。
-        self.declare_parameter("heading_tau_s", 0.12)
+        self.declare_parameter("heading_tau_s", 0.06)
+        # ★ 实测 0.12 时弯道出口回正慢半拍，0.06 明显好很多。
+        #   它同时滤 theta 和 kappa，再小会让曲率噪声进方向。
 
         self.th_s = None          # 航向角平滑值
         self.k_s = None           # 曲率平滑值
