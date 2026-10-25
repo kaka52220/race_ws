@@ -17,3 +17,6 @@ __pycache__/
 *.rknn
 *.onnx
 *.pt
+
+# 打补丁前的备份，不进版本库
+*.bak

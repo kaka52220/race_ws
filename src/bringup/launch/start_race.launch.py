@@ -28,10 +28,12 @@ def generate_launch_description():
         DeclareLaunchArgument("height", default_value="720"),
         DeclareLaunchArgument("dry_run", default_value="false",
                               description="true = 只算不发 /cmd_vel"),
-        DeclareLaunchArgument("max_speed", default_value="0.21",
+        DeclareLaunchArgument("max_speed", default_value="0.40",
                               description="最高速，米/秒。每 1% ≈ 0.0134 m/s：0.21=16%，0.30=22%"),
         DeclareLaunchArgument("speed_scale", default_value="1.0"),
         DeclareLaunchArgument("publish_debug", default_value="true"),
+        DeclareLaunchArgument("publish_crosswalk", default_value="true",
+                              description="视觉是否发 /crosswalk（测试时可关掉，自己灌假值）"),
         DeclareLaunchArgument("base_driver", default_value="true",
                               description="是否一起起底盘节点。只想看视觉时传 false"),
     ]
@@ -51,6 +53,13 @@ def generate_launch_description():
             "image_height": LaunchConfiguration("height"),
             "pixel_format": "mjpeg2rgb",
             "framerate": 30.0,
+            # ★ 必须显式指定：usb_cam 默认会写 brightness=50，
+            #   把画面整体提亮到 202、地面饱和 233 —— 黄线冲白、白条分不出来，
+            #   循迹和斑马线检测都跟着废。实测 brightness=0 才是正常曝光。
+            "brightness": 0,
+            "autoexposure": False,  # False = 手动曝光（这个参数是 bool，不是 int！）
+            "exposure": 60,         # 对应 v4l2 的 exposure_time_absolute
+            "gain": 0,
         }],
         remappings=[("image_raw", "/camera/image_raw")],
         # 摄像头掉线自动重启（USB 掉线是常事）
@@ -69,6 +78,8 @@ def generate_launch_description():
         parameters=[{
             "publish_debug": ParameterValue(
                 LaunchConfiguration("publish_debug"), value_type=bool),
+            "publish_crosswalk": ParameterValue(
+                LaunchConfiguration("publish_crosswalk"), value_type=bool),
         }],
         respawn=True, respawn_delay=1.0,
     )

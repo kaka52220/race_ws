@@ -33,6 +33,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
+from std_msgs.msg import Float32
 from custom_msgs.msg import TrackInfo
 
 
@@ -58,24 +59,34 @@ class BrainNode(Node):
         self.declare_parameter("stanley_k", 0.7)
         # 转向律的权重（0~1）。见下方 on_track 里的说明。
         #   实测：e 平滑可信、theta 乱跳，所以先只用 e。
-        self.declare_parameter("theta_gain", 0.0)   # 航向角权重
-        self.declare_parameter("kappa_gain", 0.5)   # 曲率前馈权重。v3 的 κ 比旧版准，0.5 起步
+        self.declare_parameter("theta_gain", 0.3)   # 航向角权重。
+        #   ★ 2026-10-24 调通的值：0.3。进弯靠它提前打方向。
+        #     设 0 会明显「进弯滞后」（少了 0.3×θ 这一项前馈）。
+        self.declare_parameter("kappa_gain", 0.5)   # 曲率前馈权重。
+        #   前馈角 = kappa_gain × atan(0.143 × κ)。
+        #   κ=1.5 时：0.5→6.0°，1.0→12.1°。弯道转不过来就往上加。
 
         # 速度：linear.x 是归一化 0~1，base_node 乘 100 得到 set_car_run 的百分比。
         # 新固件实测（2026-10-24，落地编码器）：每 1% ≈ 0.0134 m/s，线性、带负载补偿。
         #   speed  8 → 0.106 m/s    speed 12 → 0.161 m/s
         #   speed 10 → 0.138 m/s    speed 15 → 0.208 m/s
         # 所以 max_speed=0.12 → 12% → 0.161 m/s。
-        self.declare_parameter("max_speed", 0.21)         # 全局最高速（米/秒）
-        self.declare_parameter("min_speed", 0.21)         # 转弯时最低速（米/秒），别停
+        self.declare_parameter("max_speed", 0.40)         # 全局最高速（米/秒）
+        self.declare_parameter("min_speed", 0.15)         # 转弯时最低速（米/秒），别停
         self.declare_parameter("speed_scale", 1.0)        # 一键倍率：0.5 = 全部减半
-        self.declare_parameter("a_lat", 0.8)              # 允许的侧向加速度 m/s²
+        self.declare_parameter("a_lat", 0.15)
+        # ★ 0.15 才有弯道减速：v = √(a_lat/κ)。
+        #   κ=1.5 时 a_lat=0.15 → v=0.32；若取 0.8 → v=0.73 相当于不减速，
+        #   全速冲进弯会「转不过来」。这个参数是弯道能不能过的关键。              # 允许的侧向加速度 m/s²
         self.declare_parameter("accel", 0.8)              # 加速度上限
         self.declare_parameter("decel", 1.5)              # 减速度上限
 
         # 安全 / 调试
         self.declare_parameter("track_timeout_s", 0.5)    # 多久没视觉就停车
-        self.declare_parameter("lost_speed", 0.07)        # 丢线时的固定爬行速度（不要用乘法，会指数衰减）
+        self.declare_parameter("lost_speed", 0.40)        # 丢线时的速度上限。
+        # ★ 实际速度 = min(lost_speed, 丢线前速度) —— 只会减速不会加速。
+        #   设成和 max_speed 一样 = 完全保持原速度（配合保持转向 = 按原轨迹继续走）。
+        #   想减速就调小；0.07 是"急刹爬行"，弯道里会看起来像停车。
         # ★ 丢线时「往哪转往哪转」：参考最近几帧的转向角，不回正。
         #   弯道里一丢线就回正，车会直冲出去（2026-10-24 推车过弯实测）。
         self.declare_parameter("lost_hold_n", 3)          # 参考最近几帧
@@ -96,9 +107,19 @@ class BrainNode(Node):
         self.k_s = None           # 曲率平滑值
         self.declare_parameter("dry_run", False)          # true = 只算不发
         self.declare_parameter("control_hz", 50.0)
+        # ── 斑马线停车（视觉阈值法发 /crosswalk，见 crosswalk.py）──
+        #   分数是"地面极亮面积百分比"，越大 = 离斑马线越近。
+        #   实测：>=8% 约 0.7 米内；负样本 207 张 / 挡板 143 张零误检。
+        self.declare_parameter("crosswalk_trigger", 8.0)   # 超过这个分数就停车
+        self.declare_parameter("crosswalk_stop_s", 3.0)    # 停几秒（规则要求 3s）
+        self.declare_parameter("crosswalk_rearm", 0.6)     # 分数掉到触发值的这个比例以下，才允许下次再停
+        # 冷却：停完之后这么多秒内不再触发。防止分数在阈值附近抖动时
+        # 反复触发把自己永久锁死（实测过：假值和真值抢话题就会这样）。
+        self.declare_parameter("crosswalk_cooldown_s", 1.0)
 
         self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.sub = self.create_subscription(TrackInfo, "/track", self.on_track, 10)
+        self.create_subscription(Float32, "/crosswalk", self.on_crosswalk, 10)
 
         self.last = None            # 最近一次的 TrackInfo
         self.last_time = 0.0
@@ -107,6 +128,10 @@ class BrainNode(Node):
         self.delta_f = 0.0          # 低通滤波后的舵机角
         self.state = "WAIT"
         self.lost_cnt = 0           # 连续丢线帧数（滞回用）
+        self.cw = 0.0               # 最新斑马线分数
+        self.cw_stop_until = 0.0    # 停车截止时刻
+        self.cw_armed = True        # 是否允许触发（过一个斑马线只停一次）
+        self.cw_done_at = 0.0       # 上次停车结束的时刻（冷却用）
         # 最近若干帧的转向角，丢线时沿用（「往哪转往哪转」，不回正）
         self.steer_hist = deque(maxlen=15)
         self.ok_cnt = 0             # 连续正常帧数（滞回用）
@@ -130,6 +155,9 @@ class BrainNode(Node):
         else:
             self.n_ok += 1
 
+    def on_crosswalk(self, msg):
+        self.cw = float(msg.data)
+
     # ─────────────────────────────────────────────────────────
     def on_timer(self):
         g = self.get_parameter
@@ -144,6 +172,29 @@ class BrainNode(Node):
             return
 
         msg = self.last
+
+        # ── 斑马线停车：分数超阈值就停 crosswalk_stop_s 秒，然后继续 ──
+        #   滞回：分数要掉到触发值的 crosswalk_rearm 倍以下才重新武装，
+        #   否则停完 3 秒会立刻再触发一次，车就卡在斑马线不动了。
+        trig = float(g("crosswalk_trigger").value)
+        cool = float(g("crosswalk_cooldown_s").value)
+        if self.cw >= trig and self.cw_armed and now >= self.cw_done_at + cool:
+            self.cw_stop_until = now + float(g("crosswalk_stop_s").value)
+            self.cw_armed = False
+            self.get_logger().warn(
+                f"斑马线 {self.cw:.1f}% >= {trig:.1f}% → 停车 "
+                f"{float(g('crosswalk_stop_s').value):.1f}s",
+                throttle_duration_sec=2.0)
+        elif self.cw < trig * float(g("crosswalk_rearm").value) \
+                and now >= self.cw_done_at + cool:
+            self.cw_armed = True
+        if now < self.cw_stop_until:
+            self.state = "STOP_CROSSWALK"
+            self.v_cmd = 0.0
+            self.publish(0.0, 0.0)
+            return
+        elif self.cw_stop_until > 0.0 and self.cw_done_at < self.cw_stop_until:
+            self.cw_done_at = self.cw_stop_until      # 停完了，记下时刻，开始冷却
 
         # ── 丢线处理：固定爬行速度 + 滞回 ──
         #   不要写成「每帧把速度乘一个系数」：20ms 一帧乘 0.5，五个周期就归零，

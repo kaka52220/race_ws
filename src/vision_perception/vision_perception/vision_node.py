@@ -20,13 +20,14 @@ import time
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
-from std_msgs.msg import Header
+from std_msgs.msg import Header, Float32
 from cv_bridge import CvBridge
 import numpy as np
 
 from custom_msgs.msg import TrackInfo
 from .lane_tracker import LaneTracker
 from .lane_params import DEFAULTS
+from .crosswalk import crosswalk_score, red_light_box
 
 
 class VisionNode(Node):
@@ -38,6 +39,9 @@ class VisionNode(Node):
         self.declare_parameter("debug_image_hz", 3.0)   # 3 Hz 够看，10 Hz 会让帧率掉到 17
         self.declare_parameter("image_topic", "/camera/image_raw")
         self.declare_parameter("publish_debug", True)
+        # 斑马线 / 红灯（阈值法，见 crosswalk.py）
+        self.declare_parameter("publish_crosswalk", True)
+        self.declare_parameter("crosswalk_trigger", 8.0)
         # 把 lane_params 里的每个参数都登记成 ROS 参数（前缀 lane.）
         for k, v in DEFAULTS.items():
             self.declare_parameter(f"lane.{k}", v)
@@ -57,6 +61,8 @@ class VisionNode(Node):
 
         self.bridge = CvBridge()
         self.pub_track = self.create_publisher(TrackInfo, "/track", 10)
+        self.pub_cw = (self.create_publisher(Float32, "/crosswalk", 10)
+                       if self.get_parameter("publish_crosswalk").value else None)
         self.pub_dbg = (self.create_publisher(Image, "/debug/track_image", 2)
                         if self.get_parameter("publish_debug").value else None)
         self.sub = self.create_subscription(
@@ -104,6 +110,17 @@ class VisionNode(Node):
         m.n_points = int(r.get("n_pts", 0))
         m.reject_reason = str(r.get("reject_reason", ""))[:120]
         self.pub_track.publish(m)
+        # ── 斑马线：地面极亮面积百分比，越大 = 离斑马线越近 ──
+        #   阈值法，0 误检（实测 350 张负样本），不需要训练。
+        #   >= crosswalk_trigger（默认 8%）= 约 0.7 米内，大脑据此停车。
+        if self.pub_cw is not None:
+            try:
+                cw = crosswalk_score(frame)
+                self.pub_cw.publish(Float32(data=float(cw)))
+                self.cw_score = cw
+            except Exception as e:
+                self.get_logger().warn(f"斑马线检测失败: {e}",
+                                       throttle_duration_sec=5.0)
 
         # 调试图（低频）
         now = time.time()
