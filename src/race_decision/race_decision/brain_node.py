@@ -44,7 +44,8 @@ class BrainNode(Node):
         # ── 全部可调参数（现场用 ros2 param set 改，立即生效）──
         # 车辆几何
         self.declare_parameter("wheelbase_m", 0.143)
-        self.declare_parameter("steer_max_deg", 25.0)
+        self.declare_parameter("steer_max_deg", 32.0)  # 舵角上限。25 时前轮 15.2°→最小半径 0.53m，实测 14.1% 的帧打满，
+        # 正常弯道就没余量了。32 → 前轮 19.5°、半径 0.40m。硬件上限 40。
         self.declare_parameter("steer_trim_deg", 0.0)     # 直线跑偏时调这个
         self.declare_parameter("steer_rate_deg_per_s", 200.0)  # 舵机变化率上限
         self.declare_parameter("steer_sign", 1.0)         # 方向翻转。★ 2026-10-23 静态实测：车偏左时前轮应指车道中心；设为 -1 时指外侧 → 正确的就是 +1
@@ -142,7 +143,7 @@ class BrainNode(Node):
         self.declare_parameter("cw_block_dist_m", 1.5)   # 近处有挡板就不看斑马线
 
         self.declare_parameter("avoid_enable", True)
-        self.declare_parameter("avoid_dist_m", 0.80)      # 多远开始绕
+        self.declare_parameter("avoid_dist_m", 0.75) # 多远开始往左让（0.55 太近 / 0.70 / 0.75）
         self.declare_parameter("bh_turn_m", 0.20)        # 挡板在我方车道内时固定左偏量
         # ★ 挡板 1 和挡板 2 的唯一稳定区别是画面横向位置 cx：
         #     挡板1（左）：cx ≤ 0.17，随车靠近一路往画面左边缘跑出去
@@ -174,7 +175,10 @@ class BrainNode(Node):
         self.declare_parameter("cam_yaw_deg", 9.0)      # 相机相对车头偏航，正=向右
         self.declare_parameter("cam_hfov_deg", 99.5)    # 水平视场角
         self.declare_parameter("crosswalk_slow_trigger", 3.0)
-        self.declare_parameter("crosswalk_slow_speed", 0.25)
+        self.declare_parameter("crosswalk_slow_speed", 0.15)
+        # ★ 0.25 时停车前还滑行 2cm（0.25×80ms），正好压到斑马线上。
+        #   降到 0.15 → 滑行约 1.2cm。这个参数只影响「接近时的速度」，
+        #   不影响触发判定，所以没有误触发风险。
         self.declare_parameter("crosswalk_stop_s", 3.0)    # 停几秒（规则要求 3s）
         self.declare_parameter("crosswalk_rearm", 0.6)     # 分数掉到触发值的这个比例以下，才允许下次再停
         # 冷却：停完之后这么多秒内不再触发。防止分数在阈值附近抖动时
@@ -202,6 +206,7 @@ class BrainNode(Node):
         self.cw_done_at = 0.0       # 上次停车结束的时刻（冷却用）
 
         self.det_items = []         # 最新的挡板检测列表
+        self.seen_two = False       # 是否已见过两块挡板（区分"没到第一块"和"已过第一块"）
         self.det_time = 0.0         # 收到检测的时刻
         self.avoid_e = 0.0          # 上一次算出的横向目标
         self.avoid_last = 0.0       # 最近一次看到目标障碍的时刻
@@ -413,6 +418,16 @@ class BrainNode(Node):
             #   视觉在挡板区会把车道宽报窄（0.47~0.90 跳），所以取一个下限，
             #   否则窄报时会把真正挡路的那块误判成"线外"。
             dmax = float(g("avoid_dist_m").value)
+            n_bar = sum(1 for it in self.det_items if it.class_id == 2)
+            # ★ 见过两块才允许动作。
+            #   否则开进挡板区时「只有第二块可见」也满足 cx>0.23 且 n==1，
+            #   会立刻往左打 —— 而第一块挡板还没过，正好撞上。
+            #   实测时序：n=1(只有第二块) → n=2(约0.7秒) → n=1(第一块已过)。
+            #   只有最后那个 n==1 才是该转向的时刻。
+            if n_bar >= 2:
+                self.seen_two = True
+            elif n_bar == 0:
+                self.seen_two = False
             hfov = float(g("cam_hfov_deg").value)
             yaw0 = float(g("cam_yaw_deg").value)
             # 只看画面横向位置：靠左边的就是挡板1，不管它
@@ -427,7 +442,13 @@ class BrainNode(Node):
                 lat_i = it.dist_m * math.tan(
                     math.radians((it.cx - 0.5) * hfov + yaw0))
                 rel_i = lat_i - e
-                keep = it.cx > cx_gate
+                # ★ 必须只剩一块挡板才动作。
+                #   实测手推数据：n 从 1→2(t=9.67)→1(t=12.37)，而
+                #   "cx>0.23 且 dist<0.8" 在 t=11.91 就满足了 —— 比第一块
+                #   挡板出画面早 0.46 秒，所以车还没过第一块就往左打了。
+                #   加上"只剩一块"这个条件，触发时刻正好落在 t=12.37（第一块
+                #   刚出画面），时机才对。
+                keep = it.cx > cx_gate and n_bar == 1 and self.seen_two
                 self.get_logger().info(
                     "[挡板检查] cx=%.2f d=%.2f lat=%+.2f rel=%+.2f -> %s"
                     % (it.cx, it.dist_m, lat_i, rel_i,
