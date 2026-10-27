@@ -184,6 +184,7 @@ class BrainNode(Node):
         # ★ 0.25 时停车前还滑行 2cm（0.25×80ms），正好压到斑马线上。
         #   降到 0.15 → 滑行约 1.2cm。这个参数只影响「接近时的速度」，
         #   不影响触发判定，所以没有误触发风险。
+        self.declare_parameter("voice_enable", True)   # 斑马线停车语音播报
         self.declare_parameter("crosswalk_stop_s", 3.0)    # 停几秒（规则要求 3s）
         self.declare_parameter("crosswalk_rearm", 0.6)     # 分数掉到触发值的这个比例以下，才允许下次再停
         # 冷却：停完之后这么多秒内不再触发。防止分数在阈值附近抖动时
@@ -203,9 +204,11 @@ class BrainNode(Node):
         self.v_cmd = 0.0            # 当前指令速度（做加减速斜坡用）
         self.steer_prev = 0.0       # 上一帧舵机角（做变化率限制用）
         self.delta_f = 0.0          # 低通滤波后的舵机角
+        self.t0 = self.get_clock().now().nanoseconds / 1e9   # 启动时刻（日志计时用）
         self.state = "WAIT"
         self.lost_cnt = 0           # 连续丢线帧数（滞回用）
         self.cw = 0.0               # 最新斑马线分数
+        self.pub_voice = self.create_publisher(String, "/voice_cmd", 10)
         self.cw_stop_until = 0.0    # 停车截止时刻
         self.cw_armed = True        # 是否允许触发（过一个斑马线只停一次）
         self.cw_done_at = 0.0       # 上次停车结束的时刻（冷却用）
@@ -287,6 +290,10 @@ class BrainNode(Node):
         if self.cw >= trig and self.cw_armed and cw_ok and now >= self.cw_done_at + cool:
             self.cw_stop_until = now + float(g("crosswalk_stop_s").value)
             self.cw_armed = False
+            if bool(g("voice_enable").value):
+                # voice_player 节点订阅 /voice_cmd，收到含"人行道"的文本就播
+                # /home/orangepi/piper/piper/yield_walk.wav
+                self.pub_voice.publish(String(data="人行道，停车"))
             self.get_logger().warn(
                 f"斑马线 {self.cw:.1f}% >= {trig:.1f}% → 停车 "
                 f"{float(g('crosswalk_stop_s').value):.1f}s",
@@ -559,7 +566,8 @@ class BrainNode(Node):
         if now - self.t_last_log > 2.0:
             self.t_last_log = now
             self.get_logger().info(
-                f"[{self.state}] e={e*100:+6.1f}cm θ={math.degrees(th):+5.2f}° "
+                f"[{self.state}] t={now - self.t0:6.1f}s "
+                f"e={e*100:+6.1f}cm θ={math.degrees(th):+5.2f}° "
                 f"κ={kappa:+.3f} → δ原始={math.degrees(delta_raw):+6.1f}° "
                 f"滤波后={math.degrees(delta):+6.1f}° "
                 f"v={v_cmd:.3f} | ok={self.n_ok} lost={self.n_lost}")

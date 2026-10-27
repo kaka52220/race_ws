@@ -132,7 +132,16 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration("base_driver")),
     )
 
+    # ⑤ 语音播报（brain_node 在斑马线停车时发 /voice_cmd）
+    voice = Node(
+        package="voice_player",
+        executable="voice_node",
+        name="voice_node",
+        output="screen",
+        respawn=True, respawn_delay=2.0,
+    )
+
     return LaunchDescription(args + [
         LogInfo(msg="=== 任务二发车 ==="),
-        camera, vision, detect, brain, base,
+        camera, vision, detect, brain, base, voice,
     ])
