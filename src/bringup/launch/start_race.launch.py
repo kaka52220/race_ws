@@ -28,7 +28,7 @@ def generate_launch_description():
         DeclareLaunchArgument("height", default_value="720"),
         DeclareLaunchArgument("dry_run", default_value="false",
                               description="true = 只算不发 /cmd_vel"),
-        DeclareLaunchArgument("max_speed", default_value="0.60",
+        DeclareLaunchArgument("max_speed", default_value="0.80",
                               description="最高速，米/秒。每 1% ≈ 0.0134 m/s：0.21=16%，0.30=22%"),
         DeclareLaunchArgument("speed_scale", default_value="1.0"),
         DeclareLaunchArgument("publish_debug", default_value="true"),

@@ -47,7 +47,7 @@ class BrainNode(Node):
         self.declare_parameter("steer_max_deg", 32.0)  # 舵角上限。25 时前轮 15.2°→最小半径 0.53m，实测 14.1% 的帧打满，
         # 正常弯道就没余量了。32 → 前轮 19.5°、半径 0.40m。硬件上限 40。
         self.declare_parameter("steer_trim_deg", 0.0)     # 直线跑偏时调这个
-        self.declare_parameter("steer_rate_deg_per_s", 200.0)  # 舵机变化率上限
+        self.declare_parameter("steer_rate_deg_per_s", 350.0)  # 舵机变化率上限
         self.declare_parameter("steer_sign", 1.0)         # 方向翻转。★ 2026-10-23 静态实测：车偏左时前轮应指车道中心；设为 -1 时指外侧 → 正确的就是 +1
         self.declare_parameter("steer_tau_s", 0.05)
         # ★ 实测 0.08 时输出滞后明显，0.05 更好。再小方向会抖。       # 转向低通时间常数（秒）。画龙就调大，0=关闭
@@ -58,12 +58,12 @@ class BrainNode(Node):
         #   k=1.5 时，e=10cm 就要走 R=0.81 m 的弯 —— 在 54cm 宽车道里等于打半舵。
         #   改 0.7 后：e=5cm → R=3.4m，e=10cm → R=1.7m，e=20cm → R=0.86m。
         #   觉得还不够柔就继续往 0.5 调；觉得跟弯慢就往 1.0 调。
-        self.declare_parameter("stanley_k", 1.0)  # e 增益。它直接用实测的 e，不依赖拟合宽度/曲率。
+        self.declare_parameter("stanley_k", 1.2)  # e 增益。它直接用实测的 e，不依赖拟合宽度/曲率。
         # 赛道宽度变化时提前量(κ)不可靠，加大这个才是"直接多打。
         # 0.7 → 1.0：e=15cm 时纠偏角 9.9° → 14.0°。
         # 转向律的权重（0~1）。见下方 on_track 里的说明。
         #   实测：e 平滑可信、theta 乱跳，所以先只用 e。
-        self.declare_parameter("theta_gain", 0.3)   # 航向角权重。
+        self.declare_parameter("theta_gain", 0.19)   # 航向角权重。
         # θ 先夹到 ±这个角度再乘 theta_gain。
         # 实测日志里 θ 会跳到 ±71°，0.3×71 = 21° 的野值。
         self.declare_parameter("theta_clip_deg", 30.0)
@@ -79,19 +79,19 @@ class BrainNode(Node):
         #   speed  8 → 0.106 m/s    speed 12 → 0.161 m/s
         #   speed 10 → 0.138 m/s    speed 15 → 0.208 m/s
         # 所以 max_speed=0.12 → 12% → 0.161 m/s。
-        self.declare_parameter("max_speed", 0.60)         # 全局最高速（米/秒）
+        self.declare_parameter("max_speed", 0.80)         # 全局最高速（米/秒）
         self.declare_parameter("min_speed", 0.20)         # 转弯时最低速（米/秒），别停
         self.declare_parameter("speed_scale", 1.0)        # 一键倍率：0.5 = 全部减半
-        self.declare_parameter("a_lat", 0.30)
+        self.declare_parameter("a_lat", 0.38)
         # 弯道限速 v = √(a_lat/κ)。0.17 太保守（κ=1.5 时只有 0.34 m/s）；
         # 0.30 → κ=1.5 时 0.45 m/s（+31%）。再大要靠 steer_max_deg 撑住舵角：
         # 现在 steer_max=32°、前馈带死区，比之前有余量。
         self.declare_parameter("accel", 0.8)              # 加速度上限
-        self.declare_parameter("decel", 1.5)              # 减速度上限
+        self.declare_parameter("decel", 2.5)              # 减速度上限
 
         # 安全 / 调试
         self.declare_parameter("track_timeout_s", 0.5)    # 多久没视觉就停车
-        self.declare_parameter("lost_speed", 0.40)        # 丢线时的速度上限。
+        self.declare_parameter("lost_speed", 0.70)        # 丢线时的速度上限。
         # ★ 实际速度 = min(lost_speed, 丢线前速度) —— 只会减速不会加速。
         #   设成和 max_speed 一样 = 完全保持原速度（配合保持转向 = 按原轨迹继续走）。
         #   想减速就调小；0.07 是"急刹爬行"，弯道里会看起来像停车。
@@ -111,6 +111,7 @@ class BrainNode(Node):
         #   e 一帧跳超过 6cm 必定是锁错线。实测出弯时出现过 -0.053 → -0.706
         #   → -0.005 → -0.412 这种乱跳，不挡的话方向盘会来回甩，把车甩出赛道。
         self.declare_parameter("e_jump_frames", 5)
+        self.declare_parameter("quality_gate", 0.45)   # quality 低于它就不采信这一帧的 e
         #   连续这么多帧都跳，说明是真位移（车真的偏了），就接受
         # ★ 横向偏置：车在弯里系统性偏右（稳态误差），用这个把目标点往左挪。
         #   e_use = e - e_bias_m。正值 = 让车往左走。
@@ -355,6 +356,12 @@ class BrainNode(Node):
         e = float(msg.lateral_error)
         th = float(msg.heading_error)
 
+        # 质量门控：quality 低说明拟合不可信（实测路口会掉到 0.34，
+        # 同时 e 跳到 +31cm），这一帧沿用上一帧的 e。
+        q = float(getattr(msg, "quality", 1.0))
+        if q < float(g("quality_gate").value) and self.e_prev is not None:
+            e = self.e_prev
+
         # ── e 单帧跳变保护 ──
         #   33ms 内车最多走 1.3cm，e 跳超过 e_jump_max_m 说明视觉锁错线了。
         #   这一帧沿用上一帧的值；但连续 e_jump_frames 帧都在跳，说明是真的偏了，接受。
@@ -382,7 +389,12 @@ class BrainNode(Node):
         kappa = self.k_s
 
         # ── 速度：按曲率限速（v = sqrt(a_lat / |κ|)）──
-        if abs(kappa) > 1e-3:
+        # 限速用的 κ 死区是「开关」而不是「减法」：
+        #   |κ| <= 死区 → 视为直道，不限速；
+        #   |κ| >  死区 → 用真实 κ 算限速。
+        #   之前写成 sqrt(a_lat / (|κ|-死区))，把曲率算小了 30%，
+        #   弯道速度被抬高 20~25%，实际侧向加速度远超 a_lat → 车往弯外飘。
+        if abs(kappa) > float(g("kappa_deadband").value):
             v_curve = math.sqrt(float(g("a_lat").value) / abs(kappa))
         else:
             v_curve = v_max
