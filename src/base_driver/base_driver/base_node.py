@@ -30,16 +30,9 @@ from Rosmaster_Lib import Rosmaster
 
 
 def speed_to_run(pct):
-    """百分比 → set_car_run 的 (state, speed)。0.5% 以下视为停车。
-
-    ★ 停车时 speed 必须传非 0，底盘固件才会主动刹车：
-        case MOTION_STOP:
-            Motion_Stop(speed==0 ? STOP_FREE : STOP_BRAKE);
-      传 (0, 0) 是 STOP_FREE（自由滑行），0.25 m/s 会多滑 2cm，
-      斑马线停车正好压到线上。传 (0, 1) 就是 STOP_BRAKE。
-    """
+    """百分比 → set_car_run 的 (state, speed)。0.5% 以下视为停车。"""
     if abs(pct) < 0.5:
-        return 0, 1          # state=0 停 + speed≠0 → 主动刹车
+        return 0, 0
     return (1 if pct > 0 else 2), int(min(100.0, abs(round(pct))))
 
 
@@ -78,7 +71,7 @@ class BaseDriverNode(Node):
         """停车。连发几次，因为要保证这一帧串口写真的到得了底盘。"""
         for _ in range(5):
             try:
-                self.bot.set_car_run(0, 1)      # 1 = 主动刹车（见 speed_to_run 注释）
+                self.bot.set_car_run(0, 0)
                 self.bot.set_akm_steering_angle(0)
             except Exception:
                 pass
@@ -105,7 +98,7 @@ class BaseDriverNode(Node):
 
     def watchdog(self):
         if time.time() - self.last_cmd_time > 0.5:
-            self.bot.set_car_run(0, 1)          # 退出也刹车，别让车带着惯性冲出去
+            self.bot.set_car_run(0, 0)
             self.bot.set_akm_steering_angle(0)
 
 

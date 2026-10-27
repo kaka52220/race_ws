@@ -60,9 +60,7 @@ def generate_launch_description():
             #   循迹和斑马线检测都跟着废。实测 brightness=0 才是正常曝光。
             "brightness": 0,
             "autoexposure": False,  # False = 手动曝光（这个参数是 bool，不是 int！）
-            # ★ 故意不写 exposure：usb_cam 的这个参数实测不生效（起车后相机
-            #   保持上一次 v4l2 的值），写死反而会造成"以为设了 60 其实没设"
-            #   的误判。曝光统一由 ~/cam.sh 每次起车前扫描设定。
+            "exposure": 60,         # 对应 v4l2 的 exposure_time_absolute
             "gain": 0,
         }],
         remappings=[("image_raw", "/camera/image_raw")],

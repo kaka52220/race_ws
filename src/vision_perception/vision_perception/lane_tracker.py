@@ -48,11 +48,27 @@ class LaneTracker:
         self.w_ref = float(self.p["lane_width_m"])     # 线中心到线中心
         self.prev_seed_x = None      # 上一帧起点处的车道中心 x（米）
         self.prev_dir = None         # 上一帧起点处的车道方向（单位向量 (d, x)）
+        self.last_good = None        # 最近一帧可信输出，用于短时遮挡保持
+        self.hold_count = 0
 
     def reset(self):
         self.w_ref = float(self.p["lane_width_m"])
         self.prev_seed_x = None
         self.prev_dir = None
+        self.last_good = None
+        self.hold_count = 0
+
+    def _hold_last_good(self, out):
+        p = self.p
+        if self.last_good is None or self.hold_count >= int(p.get("occlusion_hold_frames", 0)):
+            return out
+        held = dict(self.last_good)
+        held.update(bev=out["bev"], mask=out["mask"], n_pts=out["n_pts"],
+                    tracking=True, is_lost=False,
+                    quality=float(p.get("occlusion_hold_quality", 0.25)),
+                    reject_reason="挡板短时遮挡，沿用上一条可信中心线")
+        self.hold_count += 1
+        return held
 
     # ═══════════════════════════════════════════════════════════
     # IPM：地面 (d, x) → 原图 (u, v)，查找表只算一次
@@ -125,20 +141,12 @@ class LaneTracker:
             yel = cv2.morphologyEx(yel, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8))
         blue = cv2.inRange(hsv, np.array([p["blue_h_min"], p["blue_s_min"], p["blue_v_min"]]),
                            np.array([p["blue_h_max"], 255, 255]))
-        # 灰色路面：低饱和 + 不太暗 + 非黄非蓝，再开运算去噪点
-        road = cv2.inRange(hsv, np.array([0, 0, p["road_v_min"]]),
-                           np.array([180, p["road_s_max"], 255]))
-        road[(yel > 0) | (blue > 0)] = 0
-        k = p["road_open_px"]
-        if k > 1:
-            road = cv2.morphologyEx(road, cv2.MORPH_OPEN, np.ones((k, k), np.uint8))
-        v = self.bev_valid
-        return (yel > 0) & v, (blue > 0) & v, (road > 0) & v
+        return (yel > 0) & self.bev_valid, (blue > 0) & self.bev_valid
 
     # ═══════════════════════════════════════════════════════════
     # 种子：最近处、离上一帧中心最近的一块路面
     # ═══════════════════════════════════════════════════════════
-    def _find_seed(self, yel, blue, road_m=None):
+    def _find_seed(self, yel, blue):
         p = self.p
         x_pref = self.prev_seed_x if self.prev_seed_x is not None else 0.0
         c_pref = (x_pref / self.mpp + (self.Wb - 1) / 2)
@@ -149,8 +157,6 @@ class LaneTracker:
             if v.sum() < 2 * min_run:
                 continue
             road = v & ~yel[j] & ~blue[j]
-            if road_m is not None:
-                road = road & road_m[j]
             if road.sum() < min_run:
                 continue
             # 找连续路面段，取离偏好位置最近、且足够宽的一段
@@ -198,115 +204,81 @@ class LaneTracker:
     # ═══════════════════════════════════════════════════════════
     # 射线：从 P 沿方向 n 找第一个黄像素
     # ═══════════════════════════════════════════════════════════
-    def _rays_lr(self, pd, px, n0, n1, reach_px):
-        """左右两条射线一次算完（逐像素，与旧的逐条 _ray 规则一致）。
-        (pd, px) 起点，(n0, n1) 右法向；左 = -n。
-        self._labp 是四周补了 self._pad 像素零边的标签图（0 视野外 / 1 其它 / 2 黄 / 3 蓝），
-        射线永远不会越界，所以不用 clip；查找用 bytes.find（C 速度）。
-        返回 ((sl, 状态), (sr, 状态))。"""
-        if getattr(self, "_ray_key", None) != reach_px:
-            k = np.arange(1, reach_px + 1, dtype=np.float64)
-            self._ray_kk = np.concatenate([-k, k])      # 前 N = 左，后 N = 右
-            self._ray_key = reach_px
-        N = reach_px
-        mpp = self.mpp
-        pad = self._pad
-        kk = self._ray_kk
-        r0 = (self.d_max - pd) / mpp + pad
-        c0 = px / mpp + (self.Wb - 1) / 2 + pad
-        r = np.rint(r0 - n0 * kk).astype(np.intp)
-        c = np.rint(c0 + n1 * kk).astype(np.intp)
-        buf = self._labp[r, c].tobytes()
-        need = self._blue_need
-        lw = self.p["line_width_m"]
-        out = []
-        for li in (buf[:N], buf[N:]):
-            fb = li.find(b"\x00")
-            if fb < 0:
-                fb = N
-            fh = li.find(b"\x02", 0, fb)
-            if fh >= 0:
-                out.append(((fh + 0.5) * mpp, "hit"))
-                continue
-            res = None
-            if fb > need:
-                kb = li.find(self._blue_run, 0, fb)
-                if kb >= 0:
-                    dist = (kb + 0.5) * mpp - lw
-                    if dist > 0:
-                        res = (dist, "edge")
-            if res is None:
-                res = (None, "fov") if fb < N else (None, "none")
-            out.append(res)
-        return out[0], out[1]
+    def _ray(self, yel, P, n, reach_px):
+        """返回 (距离米 或 None, 状态)。状态：'hit' / 'fov'（先出了视野）/ 'none'。"""
+        s = np.arange(1, reach_px + 1) * self.mpp
+        d = P[0] + s * n[0]
+        x = P[1] + s * n[1]
+        r, c = self._rc(d, x)
+        r = np.round(r).astype(int)
+        c = np.round(c).astype(int)
+        inside = (r >= 0) & (r < self.Hb) & (c >= 0) & (c < self.Wb)
+        valid = np.zeros(len(s), bool)
+        hit = np.zeros(len(s), bool)
+        valid[inside] = self.bev_valid[r[inside], c[inside]]
+        hit[inside] = yel[r[inside], c[inside]]
+        first_hit = np.argmax(hit) if hit.any() else None
+        first_bad = np.argmax(~valid) if (~valid).any() else None
+        if first_hit is not None and (first_bad is None or first_hit < first_bad):
+            return float(s[first_hit]) - 0.5 * self.mpp, "hit"
+        if first_bad is not None:
+            return None, "fov"
+        return None, "none"
 
-    def _lab_at(self, d, x):
-        """(d, x) 处标签（0 视野外 / 1 其它 / 2 黄 / 3 蓝），纯标量。"""
-        r = int(round((self.d_max - d) / self.mpp)) + self._pad
-        c = int(round(x / self.mpp + (self.Wb - 1) / 2)) + self._pad
-        H, W = self._labp.shape
-        if 0 <= r < H and 0 <= c < W:
-            return int(self._labp[r, c])
-        return 0
+    def _is_yel(self, yel, P):
+        r, c = self._rc(P[0], P[1])
+        r, c = int(round(r)), int(round(c))
+        if 0 <= r < self.Hb and 0 <= c < self.Wb:
+            return bool(yel[r, c])
+        return False
+
+    def _is_valid(self, P):
+        r, c = self._rc(P[0], P[1])
+        r, c = int(round(r)), int(round(c))
+        return 0 <= r < self.Hb and 0 <= c < self.Wb and bool(self.bev_valid[r, c])
 
     # ═══════════════════════════════════════════════════════════
     # 射线行进：沿车道走出中心线
     # ═══════════════════════════════════════════════════════════
-    def march(self, yel, blue, road=None):
+    def march(self, yel, blue):
         p = self.p
         res = {"C": [], "L": [], "R": [], "side": [], "reason": ""}
-        lab = self.bev_valid.astype(np.uint8)
-        lab[blue] = 3
-        lab[yel] = 2
-        # 四周补零：最长射线 + 余量，射线查表永不越界
-        reach = int((p["partner_max_m"] - p["line_width_m"] + 0.05) / self.mpp)
-        self._pad = pad = reach + 2
-        self._labp = cv2.copyMakeBorder(lab, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
-        self._blue_need = need = max(2, int(p["blue_edge_min_m"] / self.mpp))
-        self._blue_run = b"\x03" * need
-        seed = self._find_seed(yel, blue, road)
+        seed = self._find_seed(yel, blue)
         if seed is None:
             res["reason"] = "近处找不到路面（种子丢失）"
             return res
         d0, x0 = seed
         t = self._init_dir(yel, d0, x0)
-        # 每步只涉及几个 2 维量：全部用 Python 浮点，避免小 numpy 数组的调用开销
-        t0, t1 = float(t[0]), float(t[1])
-        pd, px = float(d0), float(x0)
+        P = np.array([d0, x0], float)
 
         lw = p["line_width_m"]
         w_in = self.w_ref - lw                          # 内沿到内沿
         w_in_min = p["partner_min_m"] - lw
         w_in_max = p["partner_max_m"] - lw
-        reach_px = int((w_in_max + 0.05) / self.mpp)
+        w_in_wide_max = p.get("wide_lane_max_m", p["partner_max_m"]) - lw
+        reach_px = int((max(w_in_max, w_in_wide_max) + 0.05) / self.mpp)
         step = p["march_step_m"]
         n_steps = int(p["march_len_m"] / step)
         jump = p["edge_jump_m"]
         max_turn = p["max_curvature_1pm"] * step * 1.5  # 每步方向最多转多少（弧度）
         skip_max = int(p["block_stop_m"] / step)
-        lim_off = p["max_off_step_m"]
-        start_lim = int(p["start_search_m"] / step)
-        lab_at = self._lab_at
-        Cs, Ls, Rs, sides = res["C"], res["L"], res["R"], res["side"]
         prev_sl = prev_sr = None
-        off_exp = 0.0
         skip = 0
-        for _ in range(n_steps):
-            lb = lab_at(pd, px)
-            if lb == 0:
+        for k in range(n_steps):
+            if not self._is_valid(P):
                 res["reason"] = "中心线走出相机视野"
                 break
-            if lb == 2:
+            if self._is_yel(yel, P):
                 # 中心压在黄线上（路口横向虚线、起步时车身压线）→ 往前跨
                 skip += 1
                 if skip > skip_max:
                     res["reason"] = "前方被黄线挡住"
                     break
-                pd += step * t0
-                px += step * t1
+                P = P + step * t
                 continue
-            n0, n1 = -t1, t0                            # 右法向
-            (sl, _), (sr, _) = self._rays_lr(pd, px, n0, n1, reach_px)
+            nr = np.array([-t[1], t[0]])                # 右法向
+            sl, stl = self._ray(yel, P, -nr, reach_px)
+            sr, str_ = self._ray(yel, P, nr, reach_px)
             # 连续性：同一侧边界距离不能突然跳（中心点每步都在动，用宽度变化判断）
             if sl is not None and prev_sl is not None and abs(sl - prev_sl) > jump + 0.5 * step:
                 if sr is not None and prev_sr is not None and abs(sr - prev_sr) <= jump:
@@ -321,24 +293,28 @@ class LaneTracker:
                     if skip > skip_max:
                         res["reason"] = "两边黄线挨得太近（横线缺口）"
                         break
-                    pd += step * t0
-                    px += step * t1
+                    P = P + step * t
                     continue
                 if w > w_in_max:
-                    # 太宽：留下离「当前宽度估计」更吻合的那一侧
-                    if abs(sl - w_in / 2) <= abs(sr - w_in / 2):
-                        sr = None
+                    # 挡板区可能是真正的宽车道：只在两侧射线都连续、
+                    # 且宽度仍在物理上限内时保留双边中心；固定 54 cm
+                    # 先验不被改写，离开宽区后自动恢复。
+                    if p.get("wide_lane_enable", False) and w <= w_in_wide_max:
+                        res["wide_count"] = res.get("wide_count", 0) + 1
                     else:
-                        sl = None
+                        # 太宽：留下离「当前宽度估计」更吻合的那一侧
+                        if abs(sl - w_in / 2) <= abs(sr - w_in / 2):
+                            sr = None
+                        else:
+                            sl = None
             if sl is None and sr is None:
                 skip += 1
                 # 起步阶段（最近处视野很窄，两条线都还没进画面）允许多走一段
-                lim = skip_max if Cs else start_lim
+                lim = skip_max if res["C"] else int(p["start_search_m"] / step)
                 if skip > lim:
                     res["reason"] = "两侧边界都看不到了"
                     break
-                pd += step * t0
-                px += step * t1
+                P = P + step * t
                 continue
             skip = 0
             if sl is not None and sr is not None:
@@ -352,89 +328,37 @@ class LaneTracker:
                 side = 2
             # 锁定之后，中心每步的横向修正有上限：车道不会一步横移好几厘米，
             # 大跳一定是射线打到了别的线（路口、隔壁车道）
-            #（限制的是「相对上一步预期」的变化：上一步重新居中了预期 0，
-            #  没居中（中心在视野外、沿着线走）预期就是上一步的偏移）
-            if len(Cs) >= 3:
-                off = max(off_exp - lim_off, min(off_exp + lim_off, off))
-            cd_, cx_ = pd + off * n0, px + off * n1
-            Cs.append((cd_, cx_))
-            Ls.append((pd - sl * n0, px - sl * n1) if sl is not None else None)
-            Rs.append((pd + sr * n0, px + sr * n1) if sr is not None else None)
-            sides.append(side)
+            if len(res["C"]) >= 3:
+                lim_off = p["max_off_step_m"]
+                off = max(-lim_off, min(lim_off, off))
+            C = P + off * nr
+            res["C"].append(C)
+            res["L"].append(P - sl * nr if sl is not None else None)
+            res["R"].append(P + sr * nr if sr is not None else None)
+            res["side"].append(side)
             # 下一步射线起点：中心在视野内就挪到中心；中心出了视野（车贴着一侧线、
             # 另一半车道在画面外）就留在原来的偏移上，沿着看得见的那条线走
-            recenter = lab_at(cd_, cx_) != 0
+            recenter = self._is_valid(C)
             o = off if recenter else 0.0
-            off_exp = 0.0 if recenter else off
             prev_sl = None if sl is None else sl + o
             prev_sr = None if sr is None else sr - o
-            if recenter:
-                pd, px = cd_, cx_
+            base = C if recenter else P
             # 方向：用最近几个中心点
-            if len(Cs) >= 3:
-                a0 = Cs[-5] if len(Cs) >= 5 else Cs[0]
-                dv0, dv1 = cd_ - a0[0], cx_ - a0[1]
-                nv = math.hypot(dv0, dv1)
+            if len(res["C"]) >= 3:
+                a = np.array(res["C"][-5:])
+                dv = a[-1] - a[0]
+                nv = np.linalg.norm(dv)
                 if nv > 1e-6:
-                    u0, u1 = dv0 / nv, dv1 / nv
-                    ang = math.atan2(t0 * u1 - t1 * u0, t0 * u0 + t1 * u1)
+                    t_new = dv / nv
+                    ang = math.atan2(t[0] * t_new[1] - t[1] * t_new[0], float(t @ t_new))
                     ang = max(-max_turn, min(max_turn, ang))
                     ca, sa = math.cos(ang), math.sin(ang)
-                    t0, t1 = t0 * ca - t1 * sa, t0 * sa + t1 * ca
-            if t0 < -0.2 and len(Cs) * step > 0.6:
+                    t = np.array([t[0] * ca - t[1] * sa, t[0] * sa + t[1] * ca])
+            if t[0] < -0.2 and len(res["C"]) * step > 0.6:
                 res["reason"] = "车道已经掉头"
                 break
-            pd += step * t0
-            px += step * t1
+            P = base + step * t
         return res
-
-    def _trim_start(self, C):
-        """起步钩子：起点那 3 步的走向，和「后面两段走向线性外推回来」的预测差太多就丢掉。
-        用外推而不是直接比较，是为了急弯里正常的航向变化不被误删。最多丢 trim_max 步。"""
-        p = self.p
-        kmax = int(p["trim_max_steps"])
-        if len(C) < kmax + 10:
-            return 0
-        lim = math.radians(p["trim_angle_deg"])
-
-        def ang(i, j):
-            v = C[j] - C[i]
-            return math.atan2(v[1], v[0])
-
-        def wrap(x):
-            return (x + math.pi) % (2 * math.pi) - math.pi
-        k = 0
-        while k < kmax:
-            a0, a1, a2 = ang(k, k + 3), ang(k + 3, k + 6), ang(k + 6, k + 9)
-            pred = a1 - wrap(a2 - a1)
-            if abs(wrap(a0 - pred)) <= lim:
-                break
-            k += 1
-        return k
-
-    @staticmethod
-    def _smooth_path(C, win):
-        """局部二次拟合平滑（端点用最近的完整窗口），win 为奇数步数。"""
-        n = len(C)
-        if win < 5 or n < win:
-            return C
-        win |= 1
-        h = win // 2
-        k = np.arange(-h, h + 1, dtype=float)
-        A = np.stack([np.ones_like(k), k, k * k], 1)
-        P = np.linalg.pinv(A)                  # 3 × win
-        out = np.empty_like(C)
-        # 中间点：窗口中心处的拟合值 = 系数行 P[0] 与窗口的卷积（向量化）
-        ker = P[0][::-1]
-        out[h:n - h, 0] = np.convolve(C[:, 0], ker, "valid")
-        out[h:n - h, 1] = np.convolve(C[:, 1], ker, "valid")
-        # 两端：用最近的完整窗口的二次式外插
-        for c, idx in ((h, range(0, h)), (n - 1 - h, range(n - h, n))):
-            coef = P @ C[c - h:c + h + 1]
-            for i in idx:
-                tt = i - c
-                out[i] = coef[0] + coef[1] * tt + coef[2] * tt * tt
-        return out
 
     # ═══════════════════════════════════════════════════════════
     # 对外主函数
@@ -444,7 +368,7 @@ class LaneTracker:
         if img.shape[1] != p["img_w"] or img.shape[0] != p["img_h"]:
             img = cv2.resize(img, (p["img_w"], p["img_h"]))
         bev = self.to_bev(img)
-        yel, blue, road = self.color_masks(bev)
+        yel, blue = self.color_masks(bev)
         out = {
             "bev": bev, "mask": yel.astype(np.uint8) * 255,
             "coefL": None, "coefR": None, "mid_coef": None,
@@ -454,7 +378,7 @@ class LaneTracker:
             "n_pts": int(yel.sum()), "look_x_m": 0.0, "look_d_m": 0.0,
             "path": np.zeros((0, 2)), "Lpts": np.zeros((0, 2)), "Rpts": np.zeros((0, 2)),
         }
-        res = self.march(yel, blue, road)
+        res = self.march(yel, blue)
         C = np.array(res["C"]).reshape(-1, 2)
         Lp = np.array([q for q in res["L"] if q is not None]).reshape(-1, 2)
         Rp = np.array([q for q in res["R"] if q is not None]).reshape(-1, 2)
@@ -463,80 +387,54 @@ class LaneTracker:
         step = p["march_step_m"]
         if len(C) < p["min_steps"]:
             out["reject_reason"] = f"只走出 {len(C)*step:.2f} m 车道（{res['reason']}）"
+            held = self._hold_last_good(out)
+            if not held["is_lost"]:
+                return held
             self.prev_dir = None
             self.prev_seed_x = float(C[0, 1]) if len(C) else None
             return out
 
-        # ── 去掉起步钩子：刚起步时方向还没对准，最初几个中心点会歪出去一截 ──
-        k_trim = self._trim_start(C)
-        if k_trim:
-            C, side = C[k_trim:], side[k_trim:]
-            res["L"], res["R"] = res["L"][k_trim:], res["R"][k_trim:]
-        # ── 平滑：Savitzky-Golay 式局部二次拟合（保弯道形状，去 1~2 px 抖动）──
-        C = self._smooth_path(C, int(p["smooth_n"]))
-        out["path"] = C
+        # ── 平滑：射线每步都有 1~2 个像素的抖动，滑动平均一下再求导 ──
+        k_sm = int(p["smooth_n"])
+        if k_sm > 1 and len(C) > k_sm:
+            pad = k_sm // 2
+            Cp = np.vstack([np.repeat(C[:1], pad, 0), C, np.repeat(C[-1:], pad, 0)])
+            ker = np.ones(k_sm) / k_sm
+            C = np.stack([np.convolve(Cp[:, 0], ker, "valid"),
+                          np.convolve(Cp[:, 1], ker, "valid")], 1)
+            out["path"] = C
         # ── 弧长参数化 ──
         seg = np.linalg.norm(np.diff(C, axis=0), axis=1)
         s = np.r_[0.0, np.cumsum(seg)]
         length = float(s[-1])
 
-        # ── 起点附近一段中心线做参数二次拟合 d(s)、x(s)：
-        #    theta、kappa、e 都从同一条拟合曲线上取，彼此一致，也比逐点差分稳 ──
-        nf = int(np.searchsorted(s, p["curv_len_m"])) + 1
-        nf = max(min(len(C), 4), min(nf, len(C)))
-        sf = s[:nf]
-        deg = 2 if sf[-1] > 0.15 and nf >= 6 else 1
-        cd = np.polyfit(sf, C[:nf, 0], deg)
-        cx = np.polyfit(sf, C[:nf, 1], deg)
-        d1, x1 = np.polyval(np.polyder(cd), 0.0), np.polyval(np.polyder(cx), 0.0)
-        if deg == 2:
-            d2, x2 = 2 * cd[0], 2 * cx[0]
-        else:
-            d2 = x2 = 0.0
-        nrm = math.hypot(d1, x1)
-        if nrm < 1e-6:
-            d1, x1, nrm = 1.0, 0.0, 1.0
-        t0 = np.array([d1, x1]) / nrm
-        # 端点导数对噪声敏感：theta 改用起点后 head_len 一段的主方向（PCA）
-        nh = max(3, min(len(C), int(np.searchsorted(s, p["head_len_m"])) + 1))
+        # ── 起点附近的方向（用前 head_len_m 弧长做直线拟合，抗噪）──
+        nh = max(3, int(np.searchsorted(s, p["head_len_m"])) + 1)
         A = C[:nh]
-        _, vec = np.linalg.eigh(np.cov((A - A.mean(0)).T))
-        th_dir = vec[:, 1]
-        if th_dir @ (A[-1] - A[0]) < 0:
-            th_dir = -th_dir
-        theta = math.atan2(-th_dir[1], th_dir[0])      # 车道往左 → 正
-        kappa = (x1 * d2 - d1 * x2) / nrm ** 3          # 往左弯 → 正
-        if sf[-1] < 0.08:
+        cov = np.cov((A - A.mean(0)).T)
+        w_, vec = np.linalg.eigh(cov)
+        t0 = vec[:, 1]
+        if t0 @ (A[-1] - A[0]) < 0:
+            t0 = -t0
+        theta = math.atan2(-t0[1], t0[0])              # 车道往左 → 正
+
+        # ── e：中心线在 d = eval_d 处的横向位置（沿起点方向外推/内插）──
+        d_e = p["eval_d_m"]
+        if C[0, 0] >= d_e or abs(t0[0]) < 0.2:
+            xe = C[0, 1] + (d_e - C[0, 0]) * (t0[1] / max(t0[0], 0.2))
+        else:
+            k = np.searchsorted(C[:, 0], d_e) if np.all(np.diff(C[:nh, 0]) > 0) else 0
+            xe = float(np.interp(d_e, C[:nh, 0], C[:nh, 1])) if k else C[0, 1]
+
+        # ── 曲率：航向角对弧长的斜率（前 curv_len_m）──
+        psi = np.unwrap(np.arctan2(-np.gradient(C[:, 1]), np.gradient(C[:, 0])))
+        nc = max(5, int(np.searchsorted(s, p["curv_len_m"])) + 1)
+        nc = min(nc, len(C))
+        if s[nc - 1] > 0.08:
+            kappa = float(np.polyfit(s[:nc], psi[:nc], 1)[0])
+        else:
             kappa = 0.0
         kappa = float(np.clip(kappa, -p["max_curvature_1pm"], p["max_curvature_1pm"]))
-        # 弦方向代表的是这段中点的航向，弯道里要按曲率退回到起点
-        theta -= kappa * 0.5 * float(s[nh - 1])
-
-        # ── 起点往往已在相机前 0.3~0.4 m，弯道里那里的车道方向早已转过二三十度。
-        #    theta / e 要的是车所在处（d = eval_d）：沿等曲率圆弧倒推回去 ──
-        d_e = p["eval_d_m"]
-        d0c, x0c = float(np.polyval(cd, 0.0)), float(np.polyval(cx, 0.0))
-        if d0c > d_e:
-            n_bk = 20
-            ds = (d0c - d_e) / n_bk
-            pd, px, psi = d0c, x0c, theta
-            for _ in range(n_bk):
-                c = max(math.cos(psi), 0.3)
-                step_s = ds / c
-                pd -= step_s * math.cos(psi)
-                px += step_s * math.sin(psi)       # 航向左正、x 右正
-                # 只在离观测起点 bk_curve_m 以内按曲率倒推，再远就沿切线（看不见的路段不臆测）
-                if (d0c - pd) <= p["bk_curve_m"]:
-                    psi -= kappa * step_s
-            xe, theta = px, psi
-        else:
-            ss = np.linspace(0.0, sf[-1], 60)
-            dd = np.polyval(cd, ss)
-            if np.all(np.diff(dd) > 0) and dd[-1] >= d_e:
-                xe = float(np.interp(d_e, dd, np.polyval(cx, ss)))
-            else:
-                xe = x0c
-        theta = max(-math.pi, min(math.pi, theta))
 
         # ── 预瞄点：离相机直线距离 look_d 的第一个中心点 ──
         rng = np.hypot(C[:, 0], C[:, 1])
@@ -545,16 +443,18 @@ class LaneTracker:
 
         # ── 车道宽：双边步的中位数 ──
         both = side == 0
-        if both.sum() >= p["min_steps"]:
+        wide_count = int(res.get("wide_count", 0))
+        wide_stable = wide_count >= int(p.get("wide_lane_min_steps", 6))
+        if both.sum() >= p["min_steps"] and (wide_count == 0 or wide_stable):
             idx = np.nonzero(both)[0]
             Ls = np.array([res["L"][i] for i in idx])
             Rs = np.array([res["R"][i] for i in idx])
             w_meas = float(np.median(np.linalg.norm(Rs - Ls, axis=1))) + p["line_width_m"]
-            w_meas = float(np.clip(w_meas, p["partner_min_m"], p["partner_max_m"]))
-            # 只用「像正常车道」的测量更新先验：宽区、路口的宽度不能带进单边补线
-            if abs(w_meas - p["lane_width_m"]) <= p["lane_width_tol_m"]:
-                self.w_ref += p["lane_width_alpha"] * (w_meas - self.w_ref)
-            lane_w = w_meas
+            w_meas = float(np.clip(w_meas, p["partner_min_m"],
+                                   p.get("wide_lane_max_m", p["partner_max_m"])))
+            self.w_ref += p["lane_width_alpha"] * (w_meas - self.w_ref)
+            # 普通区域对外仍报告固定 54 cm；只有连续确认的宽区才临时报告实测宽度。
+            lane_w = w_meas if wide_stable else self.w_ref
         else:
             lane_w = self.w_ref
 
@@ -588,6 +488,10 @@ class LaneTracker:
             "path_len_m": length,
         })
 
+        if wide_count and not wide_stable:
+            out.update(is_lost=True,
+                       reject_reason=f"宽区仅确认 {wide_count} 步，拒绝一次性改中心")
+
         limit = min(lane_w / 2 + p["e_margin_m"], p["e_abs_limit_m"])
         if abs(out["e_m"]) > limit:
             out.update(is_lost=True, reject_reason=f"e={out['e_m']*100:+.0f}cm 超出车道")
@@ -596,6 +500,14 @@ class LaneTracker:
         elif quality < p["quality_min"]:
             out.update(is_lost=True,
                        reject_reason=f"quality={quality:.2f} 太低（{res['reason']}）")
+
+        if out["is_lost"]:
+            held = self._hold_last_good(out)
+            if not held["is_lost"]:
+                return held
+        else:
+            self.last_good = dict(out)
+            self.hold_count = 0
 
         # ── 下一帧的先验 ──
         self.prev_seed_x = float(C[0, 1])
