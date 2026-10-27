@@ -143,7 +143,7 @@ class BrainNode(Node):
         # ★ 刚上电时车停在起点/挡板区，周围的白色地面、起点线、斑马线残影
         #   会让 /crosswalk 误报，一触发就固定停 3 秒，白白把距离吃掉。
         #   起步后这段时间内完全不采信 /crosswalk。
-        self.declare_parameter("cw_block_dist_m", 1.5)   # 近处有挡板就不看斑马线
+        self.declare_parameter("cw_block_dist_m", 0.5)   # 近处有挡板就不看斑马线
 
         self.declare_parameter("avoid_enable", True)
         self.declare_parameter("avoid_dist_m", 0.75) # 多远开始往左让（0.55 太近 / 0.70 / 0.75）
@@ -154,7 +154,7 @@ class BrainNode(Node):
         #   实测 rel/lat/dist 在两者间都重叠（挡板1 rel=-0.09~-0.31，
         #   挡板2 rel=-0.00~-0.06），只有 cx 完全不重叠，所以用 cx 做判据。
         self.declare_parameter("cx_gate", 0.23)   # 已不参与判定，保留作日志参考
-        self.declare_parameter("barrier_half_w", 0.20)   # 挡板半宽（规格 40cm 宽）
+        self.declare_parameter("barrier_half_w", 0.266)   # 挡板半宽（规格 40cm 宽）
         self.declare_parameter("car_half_w", 0.084)      # 车半宽（16.8cm）          # cx 大于它才认为是挡板2
         self.declare_parameter("avoid_clear_m", 0.30)
         # ★ 挡板区不看视觉的 e。视觉把车道宽当固定 0.455，而这里是 0.90，
@@ -209,6 +209,7 @@ class BrainNode(Node):
         self.lost_cnt = 0           # 连续丢线帧数（滞回用）
         self.cw = 0.0               # 最新斑马线分数
         self.pub_voice = self.create_publisher(String, "/voice_cmd", 10)
+        self.voice_at = 0.0         # 待播报时刻（停稳后播放）
         self.cw_stop_until = 0.0    # 停车截止时刻
         self.cw_armed = True        # 是否允许触发（过一个斑马线只停一次）
         self.cw_done_at = 0.0       # 上次停车结束的时刻（冷却用）
@@ -290,10 +291,10 @@ class BrainNode(Node):
         if self.cw >= trig and self.cw_armed and cw_ok and now >= self.cw_done_at + cool:
             self.cw_stop_until = now + float(g("crosswalk_stop_s").value)
             self.cw_armed = False
+            # 语音延后到车真正停稳后再播（0.6s 后），
+            # 避免音频初始化/USB 声卡唤醒的 CPU 抖动落在刹车那一瞬间。
             if bool(g("voice_enable").value):
-                # voice_player 节点订阅 /voice_cmd，收到含"人行道"的文本就播
-                # /home/orangepi/piper/piper/yield_walk.wav
-                self.pub_voice.publish(String(data="人行道，停车"))
+                self.voice_at = now + 0.6
             self.get_logger().warn(
                 f"斑马线 {self.cw:.1f}% >= {trig:.1f}% → 停车 "
                 f"{float(g('crosswalk_stop_s').value):.1f}s",
@@ -305,6 +306,10 @@ class BrainNode(Node):
             self.state = "STOP_CROSSWALK"
             self.v_cmd = 0.0
             self.publish(0.0, 0.0)
+            # 停稳后再播报（此时车已经静止，音频抖动不影响刹车）
+            if self.voice_at > 0.0 and now >= self.voice_at:
+                self.pub_voice.publish(String(data="人行道，停车"))
+                self.voice_at = 0.0
             return
         elif self.cw_stop_until > 0.0 and self.cw_done_at < self.cw_stop_until:
             self.cw_done_at = self.cw_stop_until      # 停完了，记下时刻，开始冷却
