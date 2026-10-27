@@ -58,7 +58,9 @@ class BrainNode(Node):
         #   k=1.5 时，e=10cm 就要走 R=0.81 m 的弯 —— 在 54cm 宽车道里等于打半舵。
         #   改 0.7 后：e=5cm → R=3.4m，e=10cm → R=1.7m，e=20cm → R=0.86m。
         #   觉得还不够柔就继续往 0.5 调；觉得跟弯慢就往 1.0 调。
-        self.declare_parameter("stanley_k", 0.7)
+        self.declare_parameter("stanley_k", 1.0)  # e 增益。它直接用实测的 e，不依赖拟合宽度/曲率。
+        # 赛道宽度变化时提前量(κ)不可靠，加大这个才是"直接多打。
+        # 0.7 → 1.0：e=15cm 时纠偏角 9.9° → 14.0°。
         # 转向律的权重（0~1）。见下方 on_track 里的说明。
         #   实测：e 平滑可信、theta 乱跳，所以先只用 e。
         self.declare_parameter("theta_gain", 0.3)   # 航向角权重。
@@ -67,7 +69,8 @@ class BrainNode(Node):
         self.declare_parameter("theta_clip_deg", 30.0)
         #   ★ 2026-10-24 调通的值：0.3。进弯靠它提前打方向。
         #     设 0 会明显「进弯滞后」（少了 0.3×θ 这一项前馈）。
-        self.declare_parameter("kappa_gain", 0.5)   # 曲率前馈权重。
+        self.declare_parameter("kappa_gain", 1.0)   # 曲率前馈权重（配合死区后可以开大）。
+        self.declare_parameter("kappa_deadband", 0.30)  # 曲率死区 1/m：|κ| 小于它不出前馈
         #   前馈角 = kappa_gain × atan(0.143 × κ)。
         #   κ=1.5 时：0.5→6.0°，1.0→12.1°。弯道转不过来就往上加。
 
@@ -79,10 +82,10 @@ class BrainNode(Node):
         self.declare_parameter("max_speed", 0.60)         # 全局最高速（米/秒）
         self.declare_parameter("min_speed", 0.20)         # 转弯时最低速（米/秒），别停
         self.declare_parameter("speed_scale", 1.0)        # 一键倍率：0.5 = 全部减半
-        self.declare_parameter("a_lat", 0.17)
-        # ★ 0.15 才有弯道减速：v = √(a_lat/κ)。
-        #   κ=1.5 时 a_lat=0.15 → v=0.32；若取 0.8 → v=0.73 相当于不减速，
-        #   全速冲进弯会「转不过来」。这个参数是弯道能不能过的关键。              # 允许的侧向加速度 m/s²
+        self.declare_parameter("a_lat", 0.30)
+        # 弯道限速 v = √(a_lat/κ)。0.17 太保守（κ=1.5 时只有 0.34 m/s）；
+        # 0.30 → κ=1.5 时 0.45 m/s（+31%）。再大要靠 steer_max_deg 撑住舵角：
+        # 现在 steer_max=32°、前馈带死区，比之前有余量。
         self.declare_parameter("accel", 0.8)              # 加速度上限
         self.declare_parameter("decel", 1.5)              # 减速度上限
 
@@ -150,7 +153,9 @@ class BrainNode(Node):
         #     挡板2（中）：cx 0.29 → 0.67，随车靠近往右跑（说明车从它左边过）
         #   实测 rel/lat/dist 在两者间都重叠（挡板1 rel=-0.09~-0.31，
         #   挡板2 rel=-0.00~-0.06），只有 cx 完全不重叠，所以用 cx 做判据。
-        self.declare_parameter("cx_gate", 0.23)          # cx 大于它才认为是挡板2
+        self.declare_parameter("cx_gate", 0.23)   # 已不参与判定，保留作日志参考
+        self.declare_parameter("barrier_half_w", 0.20)   # 挡板半宽（规格 40cm 宽）
+        self.declare_parameter("car_half_w", 0.084)      # 车半宽（16.8cm）          # cx 大于它才认为是挡板2
         self.declare_parameter("avoid_clear_m", 0.30)
         # ★ 挡板区不看视觉的 e。视觉把车道宽当固定 0.455，而这里是 0.90，
         #   所以 e 天生偏右约 22cm，拿它做控制必然一头对一头错。
@@ -222,6 +227,12 @@ class BrainNode(Node):
         period = 1.0 / max(float(self.get_parameter("control_hz").value), 1.0)
         self.timer = self.create_timer(period, self.on_timer)
         self.get_logger().info(
+            "避障开关 avoid_enable=%s  dist=%.2f  turn=%.2f  cx_gate=%.2f"
+            % (bool(self.get_parameter("avoid_enable").value),
+               float(self.get_parameter("avoid_dist_m").value),
+               float(self.get_parameter("bh_turn_m").value),
+               float(self.get_parameter("cx_gate").value)))
+        self.get_logger().info(
             f"brain_node 启动：{self.get_parameter('control_hz').value:.0f} Hz，"
             f"最高速 {self.get_parameter('max_speed').value} m/s，"
             f"dry_run={self.get_parameter('dry_run').value}")
@@ -235,12 +246,9 @@ class BrainNode(Node):
         else:
             self.n_ok += 1
 
-        self.get_logger().info(
-            "避障开关 avoid_enable=%s  dist=%.2f  turn=%.2f  cx_gate=%.2f"
-            % (bool(self.get_parameter("avoid_enable").value),
-               float(self.get_parameter("avoid_dist_m").value),
-               float(self.get_parameter("bh_turn_m").value),
-               float(self.get_parameter("cx_gate").value)))
+        # ★ 这里原来每帧打一行「避障开关...」，视觉 30Hz 就是每秒 30 行日志。
+        #   实测后果：主循环被日志 I/O 堵住，控制周期抖动，过挡板时出现"停顿"。
+        #   已挪到 __init__，启动打一次。
 
     def on_detections(self, msg):
         self.det_items = list(msg.items)
@@ -448,11 +456,21 @@ class BrainNode(Node):
                 #   挡板出画面早 0.46 秒，所以车还没过第一块就往左打了。
                 #   加上"只剩一块"这个条件，触发时刻正好落在 t=12.37（第一块
                 #   刚出画面），时机才对。
-                keep = it.cx > cx_gate and n_bar == 1 and self.seen_two
+                # ★ 不再要求 n_bar==1：第一块挡板的边缘常常还留在画面里，
+                #   导致 n_bar=2 而永远不动作（实测日志：正对第二块、rel=-0.00，
+                #   却因为"看到两块"判成不管，直接撞上去）。
+                #   cx > cx_gate 已经排除第一块；seen_two 保证"见过两块"，两者够用。
+                # ★ 用米制重叠判据：挡板半宽 0.20 + 车半宽 0.084 = 0.284 m。
+                #   |lat| > 0.284 说明挡板远离车的路径，不管；
+                #   |lat| < 0.284 才会碰到，往左让。
+                #   实测日志：第一块 lat=-0.49（不挡），第二块 lat=-0.13/-0.06（挡路）。
+                #   用这个就不需要 cx、n_bar、seen_two 三个不靠谱的条件了。
+                reach = float(g("barrier_half_w").value) + float(g("car_half_w").value)
+                keep = abs(lat_i) < reach
                 self.get_logger().info(
-                    "[挡板检查] cx=%.2f d=%.2f lat=%+.2f rel=%+.2f -> %s"
-                    % (it.cx, it.dist_m, lat_i, rel_i,
-                       "管" if keep else "不管"),
+                    "[挡板检查] cx=%.2f d=%.2f lat=%+.2f rel=%+.2f n=%d seen2=%s -> %s"
+                    % (it.cx, it.dist_m, lat_i, rel_i, n_bar,
+                       self.seen_two, "管" if keep else "不管"),
                     throttle_duration_sec=1.0)
                 if not keep:
                     self._state_msg.data = ("SKIP  cx=%.2f d=%.2f rel=%+.2f"
@@ -486,7 +504,12 @@ class BrainNode(Node):
         th_c = max(-th_max, min(th_max, th))
         v_eff = max(v_cmd, float(g("v_stanley_min").value))
         corr = math.atan(float(g("stanley_k").value) * e_c / v_eff)
-        steer_ff = math.atan(L * kappa) * float(g("kappa_gain").value)
+        #   ★ 曲率前馈加死区：直道上 κ 的噪声约 ±0.2，无死区时会被
+        #     kappa_gain 直接放大成舵角抖动（画龙）。死区把 |κ| 小于阈值的
+        #     部分归零，只让「真弯」出力 —— 这样 kappa_gain 才敢开大。
+        k_dead = float(g("kappa_deadband").value)
+        k_eff = math.copysign(max(abs(kappa) - k_dead, 0.0), kappa)
+        steer_ff = math.atan(L * k_eff) * float(g("kappa_gain").value)
         delta = (float(g("theta_gain").value) * th_c - corr + steer_ff
                  + math.radians(float(g("steer_trim_deg").value)))
         delta_raw = delta          # 滤波/限幅前的原始转角，只用于日志诊断
