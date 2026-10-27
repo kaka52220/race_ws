@@ -9,7 +9,8 @@ start_race.launch.py —— 一键发车
 用法：
     ros2 launch bringup start_race.launch.py
     ros2 launch bringup start_race.launch.py dry_run:=true          # 只算不发
-    ros2 launch bringup start_race.launch.py max_speed:=0.2 speed_scale:=0.6
+    ros2 launch bringup start_race.launch.py max_speed:=0.20 speed_scale:=1.0
+    ros2 launch bringup start_race.launch.py max_speed:=0.24 barrier_speed_mps:=0.12
     ros2 launch bringup start_race.launch.py camera_device:=/dev/video1
 """
 from launch import LaunchDescription
@@ -28,9 +29,12 @@ def generate_launch_description():
         DeclareLaunchArgument("height", default_value="720"),
         DeclareLaunchArgument("dry_run", default_value="false",
                               description="true = 只算不发 /cmd_vel"),
-        DeclareLaunchArgument("max_speed", default_value="0.60",
-                              description="最高速，米/秒。每 1% ≈ 0.0134 m/s：0.21=16%，0.30=22%"),
-        DeclareLaunchArgument("speed_scale", default_value="1.0"),
+        DeclareLaunchArgument("max_speed", default_value="0.20",
+                              description="直道最高速度 m/s；建议先用 0.12，再逐步增加"),
+        DeclareLaunchArgument("speed_scale", default_value="1.0",
+                              description="整体速度倍率；0.5 表示所有速度上限减半"),
+        DeclareLaunchArgument("barrier_speed_mps", default_value="0.10",
+                              description="挡板区速度上限 m/s，独立于直道最高速"),
         DeclareLaunchArgument("publish_debug", default_value="true"),
         DeclareLaunchArgument("enable_detect", default_value="true",
                               description="是否起 NPU 挡板检测节点"),
@@ -60,7 +64,9 @@ def generate_launch_description():
             #   循迹和斑马线检测都跟着废。实测 brightness=0 才是正常曝光。
             "brightness": 0,
             "autoexposure": False,  # False = 手动曝光（这个参数是 bool，不是 int！）
-            "exposure": 60,         # 对应 v4l2 的 exposure_time_absolute
+            # ★ 故意不写 exposure：usb_cam 的这个参数实测不生效（起车后相机
+            #   保持上一次 v4l2 的值），写死反而会造成"以为设了 60 其实没设"
+            #   的误判。曝光统一由 ~/cam.sh 每次起车前扫描设定。
             "gain": 0,
         }],
         remappings=[("image_raw", "/camera/image_raw")],
@@ -116,6 +122,8 @@ def generate_launch_description():
             "dry_run": ParameterValue(LaunchConfiguration("dry_run"), value_type=bool),
             "max_speed": ParameterValue(LaunchConfiguration("max_speed"), value_type=float),
             "speed_scale": ParameterValue(LaunchConfiguration("speed_scale"), value_type=float),
+            "barrier_speed_mps": ParameterValue(
+                LaunchConfiguration("barrier_speed_mps"), value_type=float),
         }],
         respawn=True, respawn_delay=1.0,
     )
