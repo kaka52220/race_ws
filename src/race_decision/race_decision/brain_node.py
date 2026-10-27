@@ -179,6 +179,7 @@ class BrainNode(Node):
         # ★ 0.25 时停车前还滑行 2cm（0.25×80ms），正好压到斑马线上。
         #   降到 0.15 → 滑行约 1.2cm。这个参数只影响「接近时的速度」，
         #   不影响触发判定，所以没有误触发风险。
+        self.declare_parameter("voice_enable", True)   # 斑马线停车语音播报
         self.declare_parameter("crosswalk_stop_s", 3.0)    # 停几秒（规则要求 3s）
         self.declare_parameter("crosswalk_rearm", 0.6)     # 分数掉到触发值的这个比例以下，才允许下次再停
         # 冷却：停完之后这么多秒内不再触发。防止分数在阈值附近抖动时
@@ -190,6 +191,7 @@ class BrainNode(Node):
         self.create_subscription(Float32, "/crosswalk", self.on_crosswalk, 10)
         self.create_subscription(Detections, "/detections", self.on_detections, 10)
         # 把挡板判定的真实结果发出来，推流工具直接显示，避免两边逻辑不一致
+        self.pub_voice = self.create_publisher(String, "/voice_cmd", 10)
         self.pub_state = self.create_publisher(String, "/barrier_state", 10)
         self._state_msg = String()
 
@@ -279,6 +281,8 @@ class BrainNode(Node):
         if self.cw >= trig and self.cw_armed and cw_ok and now >= self.cw_done_at + cool:
             self.cw_stop_until = now + float(g("crosswalk_stop_s").value)
             self.cw_armed = False
+            if bool(g("voice_enable").value):
+                self.pub_voice.publish(String(data="人行道，停车"))
             self.get_logger().warn(
                 f"斑马线 {self.cw:.1f}% >= {trig:.1f}% → 停车 "
                 f"{float(g('crosswalk_stop_s').value):.1f}s",

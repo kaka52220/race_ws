@@ -14,12 +14,12 @@ class VoiceNode(Node):
         text = msg.data
         self.get_logger().warn(f'🔈 触发语音播报: 【{text}】')
         
-        # 将你测试成功的完美播放指令直接写死在这里！
-        # 加上 & 后台播放，绝对不卡主线程
+        # 输出走 PulseAudio 默认 sink（USB 音箱）。
+        # aplay -D plughw:3,0 在这台机器上没有 card 3，会直接失败。
         if "人行道" in text:
-            os.system("aplay -D plughw:3,0 /home/orangepi/piper/piper/yield_walk.wav &")
+            os.system("paplay /home/orangepi/piper/piper/yield_walk.wav "
+                      "> /tmp/aplay.log 2>&1 &")
         else:
-            # 如果以后有红灯或其他语音，可以在这里扩展
             pass
 
 def main(args=None):
