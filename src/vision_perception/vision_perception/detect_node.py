@@ -24,6 +24,7 @@ detect_node.py —— RK3588 NPU 上跑 YOLOv8n 挡板检测
     3 类 {0: 红绿灯, 1: 挡板, 2: 斑马线}，但只训练了挡板，
     另两类的输出通道没训练过，这里只取挡板（模型 idx=1 → 消息 CLASS_BARRIER=2）。
 """
+import math
 import time
 
 import cv2
@@ -52,7 +53,8 @@ CLASS_BARRIER = Detection.CLASS_BARRIER  # 消息里挡板的编号（=2）
 # ── 相机几何（和 lane_params 一致，用来把框底边反投成距离）──
 CAM_H = 0.16            # 镜头离地高 [m]
 CAM_F = 443.2           # 焦距 [px]（1280 宽 / 99.5° 水平视场）
-HORIZON_ROW = 262       # 地平线所在行（720 高）
+HORIZON_ROW = 262
+YAW_RAD = math.radians(9.0)   # 相机光轴相对车轴右偏 9°
 
 # 归一化框 -> 原图坐标时用，运行中会被真实图像尺寸覆盖
 DEFAULT_W, DEFAULT_H = 1280, 720
@@ -216,16 +218,17 @@ class DetectNode(Node):
                 #              近距离准（0.4~0.7m 实测误差 <2%）；远处接近地平线后
                 #              1 像素=9cm，1.5m 能报成 4.4m，所以远处绝不能用它
                 h_px = y2 - y1
-                clipped_top = y1 <= 1.0
-                if clipped_top:
-                    raw_d = self._ground_dist(y2, h_img)
-                elif h_px > 12:
+                # 距离优先用「框底边反投地面」：挡板立在地面上，底边就是接地点，
+                # 在 0.3~1.6m（dv > 20px）范围内误差 <2cm，且不受顶部被裁影响。
+                # 只有底边太靠近地平线（远处）时才退回「框高」估算。
+                raw_d = self._ground_dist(y2, h_img)
+                if raw_d < 0 and h_px > 12:
                     raw_d = CAM_F * float(self.get_parameter("barrier_h_m").value) / h_px
-                else:
-                    raw_d = -1.0
                 d.dist_m = (raw_d * float(self.get_parameter("dist_a").value)
                             + float(self.get_parameter("dist_b").value)) if raw_d > 0 else -1.0
-                d.bearing_rad = 0.0
+                # 方位角：针孔模型，画面中心对应相机光轴（偏车轴右 YAW_RAD）
+                u_c = (x1 + x2) / 2.0
+                d.bearing_rad = math.atan2(w_img / 2.0 - u_c, CAM_F) - YAW_RAD
                 d.color_state = Detection.COLOR_UNKNOWN
                 m.items.append(d)
         elif not self.get_parameter("publish_empty").value:

@@ -69,8 +69,8 @@ class BrainNode(Node):
         self.declare_parameter("theta_clip_deg", 30.0)
         #   ★ 2026-10-24 调通的值：0.3。进弯靠它提前打方向。
         #     设 0 会明显「进弯滞后」（少了 0.3×θ 这一项前馈）。
-        self.declare_parameter("kappa_gain", 1.0)   # 曲率前馈权重（配合死区后可以开大）。
-        self.declare_parameter("kappa_deadband", 0.30)  # 曲率死区 1/m：|κ| 小于它不出前馈
+        self.declare_parameter("kappa_gain", 1.4)   # 曲率前馈权重（配合死区后可以开大）。
+        self.declare_parameter("kappa_deadband", 0.25)  # 曲率死区 1/m：|κ| 小于它不出前馈
         #   前馈角 = kappa_gain × atan(0.143 × κ)。
         #   κ=1.5 时：0.5→6.0°，1.0→12.1°。弯道转不过来就往上加。
 
@@ -155,7 +155,7 @@ class BrainNode(Node):
         #   实测 rel/lat/dist 在两者间都重叠（挡板1 rel=-0.09~-0.31，
         #   挡板2 rel=-0.00~-0.06），只有 cx 完全不重叠，所以用 cx 做判据。
         self.declare_parameter("cx_gate", 0.23)   # 已不参与判定，保留作日志参考
-        self.declare_parameter("barrier_half_w", 0.20)   # 挡板半宽（规格 40cm 宽）
+        self.declare_parameter("barrier_half_w", 0.32)   # 挡板半宽（规格 40cm 宽）
         self.declare_parameter("car_half_w", 0.084)      # 车半宽（16.8cm）          # cx 大于它才认为是挡板2
         self.declare_parameter("avoid_clear_m", 0.30)
         # ★ 挡板区不看视觉的 e。视觉把车道宽当固定 0.455，而这里是 0.90，
@@ -459,8 +459,8 @@ class BrainNode(Node):
                     continue
                 if it.dist_m <= 0.0 or it.dist_m > dmax:
                     continue
-                lat_i = it.dist_m * math.tan(
-                    math.radians((it.cx - 0.5) * hfov + yaw0))
+                # 横向距离直接用视觉节点给的米制方位角（针孔模型 + 已扣相机 yaw）
+                lat_i = it.dist_m * math.tan(it.bearing_rad)
                 rel_i = lat_i - e
                 # ★ 必须只剩一块挡板才动作。
                 #   实测手推数据：n 从 1→2(t=9.67)→1(t=12.37)，而
