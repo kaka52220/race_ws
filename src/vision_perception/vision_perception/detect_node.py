@@ -77,6 +77,11 @@ class DetectNode(Node):
         #   实测：底边反投在 0.8m 外就废了（1.5m 报成 4.4m），因为靠近地平线后
         #   1 像素 = 9cm；同样 1.5m，框高度模型 1 像素只差 1.3cm，且不受地面反光影响。
         self.declare_parameter("barrier_h_m", 0.40)
+        # 框宽反比系数：dist = K / w_px。2026-10-28 实测标定：
+        #   d=0.40 w=601px  d=0.60 w=403px  d=0.80 w=310px  d=1.00 w=238px
+        #   d×w = 240.4/241.7/248.3/237.7，平均 241，变异系数 1.5%
+        #   比框高（顶被裁就废）和底边反投（依赖 h/pitch/horizon）都稳得多。
+        self.declare_parameter("barrier_k_px_m", 241.0)
         # 线性修正：真实距离 = dist_a × 上式 + dist_b（默认不修正，用卷尺标定后再填）
         self.declare_parameter("dist_a", 1.0)
         self.declare_parameter("dist_b", 0.0)
@@ -215,12 +220,13 @@ class DetectNode(Node):
                 #   顶部被裁 → 底边反投 d = f·h/(row-地平线)
                 #              近距离准（0.4~0.7m 实测误差 <2%）；远处接近地平线后
                 #              1 像素=9cm，1.5m 能报成 4.4m，所以远处绝不能用它
-                h_px = y2 - y1
-                clipped_top = y1 <= 1.0
-                if clipped_top:
-                    raw_d = self._ground_dist(y2, h_img)
-                elif h_px > 12:
-                    raw_d = CAM_F * float(self.get_parameter("barrier_h_m").value) / h_px
+                # ── 距离：框宽反比（2026-10-28 实测标定）──
+                #   挡板在 0.4~0.6m 时顶部已经顶出画面，框高不可信；
+                #   底边反投依赖 h/pitch/horizon，实测误差 -13%~-42%。
+                #   框宽不受顶部裁切影响，且 d×w_px 实测变异系数仅 1.5%。
+                w_px = x2 - x1
+                if w_px >= 6:
+                    raw_d = float(self.get_parameter("barrier_k_px_m").value) / w_px
                 else:
                     raw_d = -1.0
                 d.dist_m = (raw_d * float(self.get_parameter("dist_a").value)
