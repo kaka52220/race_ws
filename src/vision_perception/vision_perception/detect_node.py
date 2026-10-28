@@ -50,9 +50,9 @@ IDX_BARRIER = 1                          # 模型里挡板的索引
 CLASS_BARRIER = Detection.CLASS_BARRIER  # 消息里挡板的编号（=2）
 
 # ── 相机几何（和 lane_params 一致，用来把框底边反投成距离）──
-CAM_H = 0.16            # 镜头离地高 [m]
+CAM_H = 0.206            # 镜头离地高 [m]
 CAM_F = 443.2           # 焦距 [px]（1280 宽 / 99.5° 水平视场）
-HORIZON_ROW = 262       # 地平线所在行（720 高）
+HORIZON_ROW = 223       # 地平线所在行（720 高）
 
 # 归一化框 -> 原图坐标时用，运行中会被真实图像尺寸覆盖
 DEFAULT_W, DEFAULT_H = 1280, 720
