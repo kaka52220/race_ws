@@ -47,7 +47,7 @@ class BrainNode(Node):
         self.declare_parameter("steer_max_deg", 32.0)  # 舵角上限。25 时前轮 15.2°→最小半径 0.53m，实测 14.1% 的帧打满，
         # 正常弯道就没余量了。32 → 前轮 19.5°、半径 0.40m。硬件上限 40。
         self.declare_parameter("steer_trim_deg", 0.0)     # 直线跑偏时调这个
-        self.declare_parameter("steer_rate_deg_per_s", 200.0)  # 舵机变化率上限
+        self.declare_parameter("steer_rate_deg_per_s", 300.0)  # 舵机变化率上限
         self.declare_parameter("steer_sign", 1.0)         # 方向翻转。★ 2026-10-23 静态实测：车偏左时前轮应指车道中心；设为 -1 时指外侧 → 正确的就是 +1
         self.declare_parameter("steer_tau_s", 0.05)
         # ★ 实测 0.08 时输出滞后明显，0.05 更好。再小方向会抖。       # 转向低通时间常数（秒）。画龙就调大，0=关闭
@@ -69,7 +69,7 @@ class BrainNode(Node):
         self.declare_parameter("theta_clip_deg", 30.0)
         #   ★ 2026-10-24 调通的值：0.3。进弯靠它提前打方向。
         #     设 0 会明显「进弯滞后」（少了 0.3×θ 这一项前馈）。
-        self.declare_parameter("kappa_gain", 1.0)   # 曲率前馈权重（配合死区后可以开大）。
+        self.declare_parameter("kappa_gain", 1.15)   # 曲率前馈权重（配合死区后可以开大）。
         self.declare_parameter("kappa_deadband", 0.30)  # 曲率死区 1/m：|κ| 小于它不出前馈
         #   前馈角 = kappa_gain × atan(0.143 × κ)。
         #   κ=1.5 时：0.5→6.0°，1.0→12.1°。弯道转不过来就往上加。
@@ -111,6 +111,10 @@ class BrainNode(Node):
         #   e 一帧跳超过 6cm 必定是锁错线。实测出弯时出现过 -0.053 → -0.706
         #   → -0.005 → -0.412 这种乱跳，不挡的话方向盘会来回甩，把车甩出赛道。
         self.declare_parameter("e_jump_frames", 5)
+        # quality 低于此值时，这一帧的 e 不采信（沿用上一帧）。
+        # 实测：路口 / 丢线边缘 quality 会掉到 0.3~0.5，此时的 e 会跳 ±30cm，
+        # 直接喂进控制就是"抽搐"。
+        self.declare_parameter("quality_gate", 0.45)
         #   连续这么多帧都跳，说明是真位移（车真的偏了），就接受
         # ★ 横向偏置：车在弯里系统性偏右（稳态误差），用这个把目标点往左挪。
         #   e_use = e - e_bias_m。正值 = 让车往左走。
@@ -146,7 +150,7 @@ class BrainNode(Node):
         self.declare_parameter("cw_block_dist_m", 0.5)   # 近处有挡板就不看斑马线
 
         self.declare_parameter("avoid_enable", True)
-        self.declare_parameter("avoid_dist_m", 0.75) # 多远开始往左让（0.55 太近 / 0.70 / 0.75）
+        self.declare_parameter("avoid_dist_m", 0.95) # 多远开始往左让（0.55 太近 / 0.70 / 0.75）
         self.declare_parameter("bh_turn_m", 0.20)        # 挡板在我方车道内时固定左偏量
         # ★ 挡板 1 和挡板 2 的唯一稳定区别是画面横向位置 cx：
         #     挡板1（左）：cx ≤ 0.17，随车靠近一路往画面左边缘跑出去
@@ -366,6 +370,11 @@ class BrainNode(Node):
         kappa = float(msg.curvature)
         e = float(msg.lateral_error)
         th = float(msg.heading_error)
+
+        # ── 质量门控 ──
+        q_now = float(getattr(msg, "quality", 1.0))
+        if q_now < float(g("quality_gate").value) and self.e_prev is not None:
+            e = self.e_prev
 
         # ── e 单帧跳变保护 ──
         #   33ms 内车最多走 1.3cm，e 跳超过 e_jump_max_m 说明视觉锁错线了。
