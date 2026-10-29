@@ -46,7 +46,10 @@ class BrainNode(Node):
         self.declare_parameter("wheelbase_m", 0.143)
         self.declare_parameter("steer_max_deg", 32.0)  # 舵角上限。25 时前轮 15.2°→最小半径 0.53m，实测 14.1% 的帧打满，
         # 正常弯道就没余量了。32 → 前轮 19.5°、半径 0.40m。硬件上限 40。
-        self.declare_parameter("steer_trim_deg", 0.0)     # 直线跑偏时调这个
+        self.declare_parameter("steer_trim_deg", 2.5)
+        # ★ 2026-10-29 实测：左弯 e 中位 -5.9cm、右弯 -5.9cm（都偏右），
+        #   直道只偏 -0.5cm → 左右弯都往右跑 = 转向机构恒定右偏。
+        #   +2.5° 约修 4cm；代价是直道往左偏约 2.6cm。     # 直线跑偏时调这个
         self.declare_parameter("steer_rate_deg_per_s", 300.0)  # 舵机变化率上限
         self.declare_parameter("steer_sign", 1.0)         # 方向翻转。★ 2026-10-23 静态实测：车偏左时前轮应指车道中心；设为 -1 时指外侧 → 正确的就是 +1
         self.declare_parameter("steer_tau_s", 0.05)
