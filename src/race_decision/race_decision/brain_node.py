@@ -393,8 +393,17 @@ class BrainNode(Node):
 
         # ── 质量门控 ──
         q_now = float(getattr(msg, "quality", 1.0))
-        if q_now < float(g("quality_gate").value) and self.e_prev is not None:
+        # ★ 2026-10-29 实测：q 低时只冻结 e 不够 —— t=9.59s 出现 theta=+71/kappa=-2.08
+        #   的垃圾帧（q=0.60），e 被冻结但 theta/kappa 照用，两个大项反号打架，
+        #   舵角从 +14 甩到 -17，车直接冲出线。所以三个量一起冻结。
+        if q_now < float(g("quality_gate").value) and getattr(self, "e_prev", None) is not None:
             e = self.e_prev
+            if getattr(self, "th_prev", None) is not None:
+                th = self.th_prev
+            if getattr(self, "k_prev", None) is not None:
+                kappa = self.k_prev
+        self.th_prev = th
+        self.k_prev = kappa
 
         # ── e 单帧跳变保护 ──
         #   33ms 内车最多走 1.3cm，e 跳超过 e_jump_max_m 说明视觉锁错线了。
