@@ -130,6 +130,11 @@ class BrainNode(Node):
         # 实测：路口 / 丢线边缘 quality 会掉到 0.3~0.5，此时的 e 会跳 ±30cm，
         # 直接喂进控制就是"抽搐"。
         self.declare_parameter("quality_gate", 0.65)
+        # ★ 2026-10-29 实测：出线段 q 从 285 到 350 帧一直是 0.60（从不恢复），
+        #   theta 在 +80~-52 之间乱跳，而车仍全速冲过去直到出线。
+        #   q 持续低于门控超过这么多帧 → 认定视觉已失效，强制降到蠕行速度。
+        self.declare_parameter("degraded_frames", 15)      # 0.5 秒
+        self.declare_parameter("degraded_speed", 0.18)
         #   连续这么多帧都跳，说明是真位移（车真的偏了），就接受
         # ★ 横向偏置：车在弯里系统性偏右（稳态误差），用这个把目标点往左挪。
         #   e_use = e - e_bias_m。正值 = 让车往左走。
@@ -396,6 +401,11 @@ class BrainNode(Node):
         # ★ 2026-10-29 实测：q 低时只冻结 e 不够 —— t=9.59s 出现 theta=+71/kappa=-2.08
         #   的垃圾帧（q=0.60），e 被冻结但 theta/kappa 照用，两个大项反号打架，
         #   舵角从 +14 甩到 -17，车直接冲出线。所以三个量一起冻结。
+        if q_now < float(g("quality_gate").value):
+            self.q_bad_cnt = getattr(self, "q_bad_cnt", 0) + 1
+        else:
+            self.q_bad_cnt = 0
+
         if q_now < float(g("quality_gate").value) and getattr(self, "e_prev", None) is not None:
             e = self.e_prev
             if getattr(self, "th_prev", None) is not None:
@@ -437,6 +447,9 @@ class BrainNode(Node):
         else:
             v_curve = v_max
         v_target = min(v_max, v_curve)
+        # 视觉长时间不可信 → 强制蠕行，别全速冲出去
+        if getattr(self, "q_bad_cnt", 0) >= int(g("degraded_frames").value):
+            v_target = min(v_target, float(g("degraded_speed").value))
         if v_max > 1e-6:                       # max_speed=0 时不要被 min_speed 抬起来
             v_target = max(v_target, float(g("min_speed").value))
 
