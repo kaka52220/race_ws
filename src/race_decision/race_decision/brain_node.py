@@ -587,7 +587,10 @@ class BrainNode(Node):
         steer_ff = math.atan(L * k_eff) * float(g("kappa_gain").value)
         # 三项都是【前轮转角】，除以机械比换成【舵机角】
         ratio = max(float(g("steer_ratio").value), 1e-3)
-        delta = ((float(g("theta_gain").value) * th_c - corr + steer_ff
+        # 增益调度：直道 0.12（不画龙），|θ|≥45° 时累加到 0.25（急折弯转得过去）
+        _tg = float(g("theta_gain").value)
+        _tg += float(g("theta_gain_kink").value) * min(1.0, abs(math.degrees(th)) / 45.0)
+        delta = ((_tg * th_c - corr + steer_ff
                   + math.radians(float(g("steer_trim_deg").value))) / ratio)
         delta_raw = delta          # 滤波/限幅前的原始转角，只用于日志诊断
 
