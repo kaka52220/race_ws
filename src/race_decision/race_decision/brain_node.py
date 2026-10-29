@@ -66,12 +66,12 @@ class BrainNode(Node):
         #   k=1.5 时，e=10cm 就要走 R=0.81 m 的弯 —— 在 54cm 宽车道里等于打半舵。
         #   改 0.7 后：e=5cm → R=3.4m，e=10cm → R=1.7m，e=20cm → R=0.86m。
         #   觉得还不够柔就继续往 0.5 调；觉得跟弯慢就往 1.0 调。
-        self.declare_parameter("stanley_k", 0.8)  # e 增益。它直接用实测的 e，不依赖拟合宽度/曲率。
+        self.declare_parameter("stanley_k", 0.52)  # 实际 e 增益 0.52/0.608*1.29=1.10（直道稳定值）  # e 增益。它直接用实测的 e，不依赖拟合宽度/曲率。
         # 赛道宽度变化时提前量(κ)不可靠，加大这个才是"直接多打。
         # 0.7 → 1.0：e=15cm 时纠偏角 9.9° → 14.0°。
         # 转向律的权重（0~1）。见下方 on_track 里的说明。
         #   实测：e 平滑可信、theta 乱跳，所以先只用 e。
-        self.declare_parameter("theta_gain", 0.5)   # 航向角权重。
+        self.declare_parameter("theta_gain", 0.21)  # 实际增益 0.21/0.608=0.35（直道稳定值）   # 航向角权重。
         # θ 先夹到 ±这个角度再乘 theta_gain。
         # 实测日志里 θ 会跳到 ±71°，0.3×71 = 21° 的野值。
         self.declare_parameter("theta_clip_deg", 30.0)
