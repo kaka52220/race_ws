@@ -133,7 +133,7 @@ class BrainNode(Node):
         # ── 斑马线停车（视觉阈值法发 /crosswalk，见 crosswalk.py）──
         #   分数是"地面极亮面积百分比"，越大 = 离斑马线越近。
         #   实测：>=8% 约 0.7 米内；负样本 207 张 / 挡板 143 张零误检。
-        self.declare_parameter("crosswalk_trigger", 8.0)   # 超过这个分数就停车
+        self.declare_parameter("crosswalk_trigger", 18.0)   # 超过这个分数就停车
         # ★ 先减速再停：高速（0.6）冲过来时刹车距离不够，会停在斑马线上。
         #   分数到 crosswalk_slow_trigger 就先把速度压到 crosswalk_slow_speed，
         #   等真到 crosswalk_trigger 再停 —— 这样停得准，又不用把停车阈值降太低。
@@ -179,7 +179,7 @@ class BrainNode(Node):
         #   正确做法：把 cx 换算成米制横向距离再判断。
         self.declare_parameter("cam_yaw_deg", 9.0)      # 相机相对车头偏航，正=向右
         self.declare_parameter("cam_hfov_deg", 99.5)    # 水平视场角
-        self.declare_parameter("crosswalk_slow_trigger", 3.0)
+        self.declare_parameter("crosswalk_slow_trigger", 10.0)
         self.declare_parameter("crosswalk_slow_speed", 0.15)
         # ★ 0.25 时停车前还滑行 2cm（0.25×80ms），正好压到斑马线上。
         #   降到 0.15 → 滑行约 1.2cm。这个参数只影响「接近时的速度」，
