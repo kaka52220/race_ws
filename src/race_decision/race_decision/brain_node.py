@@ -162,7 +162,9 @@ class BrainNode(Node):
         # ★ 刚上电时车停在起点/挡板区，周围的白色地面、起点线、斑马线残影
         #   会让 /crosswalk 误报，一触发就固定停 3 秒，白白把距离吃掉。
         #   起步后这段时间内完全不采信 /crosswalk。
-        self.declare_parameter("cw_block_dist_m", 0.5)   # 近处有挡板就不看斑马线
+        self.declare_parameter("cw_block_dist_m", 1.0)
+        # 2026-10-29 实测：挡板区那些白线被当成斑马线，车停在挡板区出口。
+        # 日志显示停车时挡板在 0.86m（>0.5 所以没屏蔽）。改成 1.0m 内一律不信斑马线。   # 近处有挡板就不看斑马线
 
         self.declare_parameter("avoid_enable", True)
         self.declare_parameter("avoid_dist_m", 0.95) # 多远开始往左让（0.55 太近 / 0.70 / 0.75）
