@@ -46,7 +46,9 @@ class BrainNode(Node):
         self.declare_parameter("wheelbase_m", 0.143)
         self.declare_parameter("steer_max_deg", 32.0)  # 舵角上限。25 时前轮 15.2°→最小半径 0.53m，实测 14.1% 的帧打满，
         # 正常弯道就没余量了。32 → 前轮 19.5°、半径 0.40m。硬件上限 40。
-        self.declare_parameter("steer_trim_deg", 0.0)
+        self.declare_parameter("steer_trim_deg", 1.2)
+        # 2026-10-29 直线实测：e 中位 -4.8cm、w 均值 +1.9 度，说明机械恒定右偏，
+        # 控制器要一直往左打才能走直。1.2 度前轮（/0.608 约 2 度舵机）抵消这个偏置。
         # 2026-10-29 实测转弯半径标定（手推走圆弧量直径）：
         #   指令 20 度 -> 直径 133cm -> R=0.665 -> 前轮 atan(0.143/0.665)=12.1 度
         #   指令 10 度 -> 直径 314cm -> R=1.570 -> 前轮 5.2 度
