@@ -550,12 +550,6 @@ class BrainNode(Node):
 
         e_c = max(-float(g("e_clip_m").value), min(float(g("e_clip_m").value), e_use))
         # θ 也夹一下：视觉偶尔给出 ±70° 的野值，不限幅就是 0.3×70=21° 的方向突变
-        # ★ 2026-10-29 实测：出线段出现 theta=+71 而 kappa=-2.08（反号），
-        #   theta 项 +11.8 与 kappa 项 -13.5 互相抵消成 ~0，车看着"在控制"却直冲出去。
-        #   两条线都完整时不可能一边往左一边右弯 —— 二阶量 kappa 更可疑，置 0 保留 theta。
-        if abs(math.degrees(th)) > 20.0 and abs(kappa) > 0.5 and th * kappa < 0.0:
-            kappa = 0.0
-
         th_max = math.radians(float(g("theta_clip_deg").value))
         th_c = max(-th_max, min(th_max, th))
         v_eff = min(max(v_cmd, float(g("v_stanley_min").value)),
