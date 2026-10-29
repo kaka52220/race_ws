@@ -554,16 +554,7 @@ class LaneTracker:
             # 只用「像正常车道」的测量更新先验：宽区、路口的宽度不能带进单边补线
             if abs(w_meas - p["lane_width_m"]) <= p["lane_width_tol_m"]:
                 self.w_ref += p["lane_width_alpha"] * (w_meas - self.w_ref)
-                lane_w = w_meas
-                w_bad = False
-            else:
-                # ★ 2026-10-29 实测（左弯出口赛道变宽）：右边线跑出画面后，
-                #   视觉用「左边线 + 假设宽度」凑出 w=0.358（真实 0.54），
-                #   中心线因此偏了约 9cm，却还报 q=0.87 让控制器完全相信。
-                #   宽度偏离先验超过 tol 时：用先验宽度，并把质量打对折，
-                #   让 brain 的 quality_gate 把这种帧挡掉（沿用上一帧）。
-                lane_w = self.w_ref
-                w_bad = True
+            lane_w = w_meas
         else:
             lane_w = self.w_ref
 
@@ -586,8 +577,6 @@ class LaneTracker:
         q_len = min(1.0, length / p["good_len_m"])
         q_both = n0 / max(1, len(side))
         quality = float(q_len * (0.6 + 0.4 * q_both))
-        if "w_bad" in dir() and w_bad:
-            quality *= 0.5
 
         # ★ 2026-10-29 实测（发夹弯入口）：出现过 theta=+61° 而 kappa=-1.35 的自相矛盾，
         #   两者反号说明左右线配错了（弯道里拟合到另一条边）。此时 kappa 前馈会和
