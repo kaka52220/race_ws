@@ -129,12 +129,7 @@ class BrainNode(Node):
         # quality 低于此值时，这一帧的 e 不采信（沿用上一帧）。
         # 实测：路口 / 丢线边缘 quality 会掉到 0.3~0.5，此时的 e 会跳 ±30cm，
         # 直接喂进控制就是"抽搐"。
-        self.declare_parameter("quality_gate", 0.65)
-        # ★ 2026-10-29 实测：出线段 q 从 285 到 350 帧一直是 0.60（从不恢复），
-        #   theta 在 +80~-52 之间乱跳，而车仍全速冲过去直到出线。
-        #   q 持续低于门控超过这么多帧 → 认定视觉已失效，强制降到蠕行速度。
-        self.declare_parameter("degraded_frames", 15)      # 0.5 秒
-        self.declare_parameter("degraded_speed", 0.18)
+        self.declare_parameter("quality_gate", 0.45)
         #   连续这么多帧都跳，说明是真位移（车真的偏了），就接受
         # ★ 横向偏置：车在弯里系统性偏右（稳态误差），用这个把目标点往左挪。
         #   e_use = e - e_bias_m。正值 = 让车往左走。
@@ -398,22 +393,8 @@ class BrainNode(Node):
 
         # ── 质量门控 ──
         q_now = float(getattr(msg, "quality", 1.0))
-        # ★ 2026-10-29 实测：q 低时只冻结 e 不够 —— t=9.59s 出现 theta=+71/kappa=-2.08
-        #   的垃圾帧（q=0.60），e 被冻结但 theta/kappa 照用，两个大项反号打架，
-        #   舵角从 +14 甩到 -17，车直接冲出线。所以三个量一起冻结。
-        if q_now < float(g("quality_gate").value):
-            self.q_bad_cnt = getattr(self, "q_bad_cnt", 0) + 1
-        else:
-            self.q_bad_cnt = 0
-
-        if q_now < float(g("quality_gate").value) and getattr(self, "e_prev", None) is not None:
+        if q_now < float(g("quality_gate").value) and self.e_prev is not None:
             e = self.e_prev
-            if getattr(self, "th_prev", None) is not None:
-                th = self.th_prev
-            if getattr(self, "k_prev", None) is not None:
-                kappa = self.k_prev
-        self.th_prev = th
-        self.k_prev = kappa
 
         # ── e 单帧跳变保护 ──
         #   33ms 内车最多走 1.3cm，e 跳超过 e_jump_max_m 说明视觉锁错线了。
@@ -447,9 +428,8 @@ class BrainNode(Node):
         else:
             v_curve = v_max
         v_target = min(v_max, v_curve)
-        # 视觉长时间不可信 → 强制蠕行，别全速冲出去
-        if getattr(self, "q_bad_cnt", 0) >= int(g("degraded_frames").value):
-            v_target = min(v_target, float(g("degraded_speed").value))
+        if q_low:
+            v_target = min(v_target, 0.30)
         if v_max > 1e-6:                       # max_speed=0 时不要被 min_speed 抬起来
             v_target = max(v_target, float(g("min_speed").value))
 
@@ -563,6 +543,16 @@ class BrainNode(Node):
 
         e_c = max(-float(g("e_clip_m").value), min(float(g("e_clip_m").value), e_use))
         # θ 也夹一下：视觉偶尔给出 ±70° 的野值，不限幅就是 0.3×70=21° 的方向突变
+        # ★ 2026-10-29 换思路：视觉在「只剩一条黄线」的区域会给出乱跳的
+        #   theta(+80~-52) 和 kappa(±2)，而 q 只掉到 0.60。之前试过冻结和只丢 kappa，
+        #   都会让两个大项抵消成 ~0（车看着有控制却直冲出去）。
+        #   现在改成：q 低于门控时【完全不用 theta / kappa】，只保留 e 的比例纠偏。
+        #   e 被 e_clip_m 钳在 ±20cm，纯比例纠偏方向永远正确、有界、不会抵消。
+        q_low = q_now < float(g("quality_gate").value)
+        if q_low:
+            th = 0.0
+            kappa = 0.0
+
         th_max = math.radians(float(g("theta_clip_deg").value))
         th_c = max(-th_max, min(th_max, th))
         v_eff = min(max(v_cmd, float(g("v_stanley_min").value)),
