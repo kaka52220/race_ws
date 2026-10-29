@@ -77,7 +77,7 @@ class BrainNode(Node):
         # 0.7 → 1.0：e=15cm 时纠偏角 9.9° → 14.0°。
         # 转向律的权重（0~1）。见下方 on_track 里的说明。
         #   实测：e 平滑可信、theta 乱跳，所以先只用 e。
-        self.declare_parameter("theta_gain", 0.25)  # 实际增益 0.21/0.608=0.35（直道稳定值）   # 航向角权重。
+        self.declare_parameter("theta_gain", 0.18)  # 实际增益 0.21/0.608=0.35（直道稳定值）   # 航向角权重。
         # θ 先夹到 ±这个角度再乘 theta_gain。
         # 实测日志里 θ 会跳到 ±71°，0.3×71 = 21° 的野值。
         self.declare_parameter("theta_clip_deg", 30.0)
