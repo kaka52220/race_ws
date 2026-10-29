@@ -351,7 +351,8 @@ class BrainNode(Node):
             self.ok_cnt += 1
             self.lost_cnt = 0
 
-        enter_lost = self.lost_cnt >= int(g("lost_enter_frames").value)
+        enter_lost = (self.lost_cnt >= int(g("lost_enter_frames").value)
+                      or getattr(self, "q_bad_cnt", 0) >= 10)
         still_lost = self.state == "LOST" and self.ok_cnt < int(g("lost_exit_frames").value)
 
         # ★ max_speed=0 表示「绝对停住，只算方向」——调试前轮用。
@@ -393,6 +394,15 @@ class BrainNode(Node):
 
         # ── 质量门控 ──
         q_now = float(getattr(msg, "quality", 1.0))
+        # 视觉是否不可信（后面速度限幅和 theta/kappa 置零都要用）
+        q_low = q_now < float(g("quality_gate").value)
+        # ★ 2026-10-29：视觉 q 持续偏低（< 门控）超过 10 帧（0.33s）→ 直接当丢线，
+        #   复用现成 LOST 分支（保持上一转角 + 降到 lost_speed），不再让乱跳的
+        #   theta/kappa 驱动全速冲出去。实测出线段 q 连续 65 帧停在 0.60。
+        if q_low:
+            self.q_bad_cnt = getattr(self, "q_bad_cnt", 0) + 1
+        else:
+            self.q_bad_cnt = 0
         if q_now < float(g("quality_gate").value) and self.e_prev is not None:
             e = self.e_prev
 
@@ -428,8 +438,6 @@ class BrainNode(Node):
         else:
             v_curve = v_max
         v_target = min(v_max, v_curve)
-        if q_low:
-            v_target = min(v_target, 0.30)
         if v_max > 1e-6:                       # max_speed=0 时不要被 min_speed 抬起来
             v_target = max(v_target, float(g("min_speed").value))
 
@@ -548,10 +556,6 @@ class BrainNode(Node):
         #   都会让两个大项抵消成 ~0（车看着有控制却直冲出去）。
         #   现在改成：q 低于门控时【完全不用 theta / kappa】，只保留 e 的比例纠偏。
         #   e 被 e_clip_m 钳在 ±20cm，纯比例纠偏方向永远正确、有界、不会抵消。
-        if q_low:
-            th = 0.0
-            kappa = 0.0
-
         th_max = math.radians(float(g("theta_clip_deg").value))
         th_c = max(-th_max, min(th_max, th))
         v_eff = min(max(v_cmd, float(g("v_stanley_min").value)),
