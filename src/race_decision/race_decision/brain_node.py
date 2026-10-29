@@ -548,7 +548,6 @@ class BrainNode(Node):
         #   都会让两个大项抵消成 ~0（车看着有控制却直冲出去）。
         #   现在改成：q 低于门控时【完全不用 theta / kappa】，只保留 e 的比例纠偏。
         #   e 被 e_clip_m 钳在 ±20cm，纯比例纠偏方向永远正确、有界、不会抵消。
-        q_low = q_now < float(g("quality_gate").value)
         if q_low:
             th = 0.0
             kappa = 0.0
