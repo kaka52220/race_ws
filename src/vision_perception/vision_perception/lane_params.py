@@ -81,7 +81,8 @@ DEFAULTS = {
     "e_margin_m": 0.15,        # |e| 允许超出半车道宽多少
     "e_abs_limit_m": 0.60,
     "quality_min": 0.30,       # 低于它 → is_lost
-    "theta_limit_deg": 110.0,  # 急弯里车被甩到外侧时，车道方向真的能到 80~90°（实拍 lap2_0130 等）
+    "theta_limit_deg": 110.0,
+    "mode_hold_frames": 8,      # mode 从单边界回到双边需要连续几帧（滞回，防抖）  # 急弯里车被甩到外侧时，车道方向真的能到 80~90°（实拍 lap2_0130 等）
     # 最小转弯半径：前轮最大实际 15.2°（舵机 25° 指令），R=0.143/tan15.2°=0.53 m
     "max_curvature_1pm": 2.5,
 

@@ -559,7 +559,21 @@ class LaneTracker:
             lane_w = self.w_ref
 
         n0, n1, n2 = int((side == 0).sum()), int((side == 1).sum()), int((side == 2).sum())
-        mode = 0 if n0 >= max(n1, n2) else (1 if n1 >= n2 else 2)
+        # ★ 2026-10-29：mode 抖动会让 kappa 的拟合窗口在两种假设间反复切换，
+        #   表现为舵角"抽搐"。加滞回：掉到单边界立即生效，但回到双边要连续
+        #   mode_hold（默认 8 帧 ≈ 0.27s）都判成双边才切回。
+        mode_raw = 0 if n0 >= max(n1, n2) else (1 if n1 >= n2 else 2)
+        if mode_raw == 0:
+            self.mode_ok_cnt = getattr(self, "mode_ok_cnt", 0) + 1
+        else:
+            self.mode_ok_cnt = 0
+        prev_mode = getattr(self, "mode_prev", 0)
+        need = int(p.get("mode_hold_frames", 8))
+        if prev_mode != 0 and self.mode_ok_cnt < need:
+            mode = prev_mode          # 还没连续够久 → 沿用单边界
+        else:
+            mode = mode_raw
+        self.mode_prev = mode
 
         # ── 兼容旧字段：x = f(d) 的二次拟合（只用中心线单调前进的那段）──
         mono = np.r_[True, np.diff(C[:, 0]) > 0]
