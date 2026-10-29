@@ -68,7 +68,11 @@ class BrainNode(Node):
         #   k=1.5 时，e=10cm 就要走 R=0.81 m 的弯 —— 在 54cm 宽车道里等于打半舵。
         #   改 0.7 后：e=5cm → R=3.4m，e=10cm → R=1.7m，e=20cm → R=0.86m。
         #   觉得还不够柔就继续往 0.5 调；觉得跟弯慢就往 1.0 调。
-        self.declare_parameter("stanley_k", 0.52)  # 实际 e 增益 0.52/0.608*1.29=1.10（直道稳定值）  # e 增益。它直接用实测的 e，不依赖拟合宽度/曲率。
+        self.declare_parameter("stanley_k", 0.52)
+        # ★ 2026-10-29：eval_d 从 0.22 减到 0.10 后 e 失去预瞄，直道画龙。
+        #   在控制端加「微分预瞄」补回阻尼：e_lead = e + e_lead_s * de/dt
+        #   这样 e 的方向仍然正确（测量点没动），又有预瞄抑制振荡。
+        self.declare_parameter("e_lead_s", 0.25)  # 实际 e 增益 0.52/0.608*1.29=1.10（直道稳定值）  # e 增益。它直接用实测的 e，不依赖拟合宽度/曲率。
         # 赛道宽度变化时提前量(κ)不可靠，加大这个才是"直接多打。
         # 0.7 → 1.0：e=15cm 时纠偏角 9.9° → 14.0°。
         # 转向律的权重（0~1）。见下方 on_track 里的说明。
@@ -545,7 +549,17 @@ class BrainNode(Node):
         th_c = max(-th_max, min(th_max, th))
         v_eff = min(max(v_cmd, float(g("v_stanley_min").value)),
                    float(g("v_stanley_max").value))
-        corr = math.atan(float(g("stanley_k").value) * e_c / v_eff)
+        # 微分预瞄：e_lead = e + Td * de/dt（给 e 补回预瞄阻尼，同时不改测量点）
+        dt_ctrl = 1.0 / max(float(g("control_hz").value), 1.0)
+        e_lead = e_c
+        if getattr(self, "e_for_lead", None) is not None:
+            de = (e_c - self.e_for_lead) / dt_ctrl
+            e_lead = e_c + float(g("e_lead_s").value) * de
+            lim = float(g("e_clip_m").value)
+            e_lead = max(-lim, min(lim, e_lead))
+        self.e_for_lead = e_c
+
+        corr = math.atan(float(g("stanley_k").value) * e_lead / v_eff)
         #   ★ 曲率前馈加死区：直道上 κ 的噪声约 ±0.2，无死区时会被
         #     kappa_gain 直接放大成舵角抖动（画龙）。死区把 |κ| 小于阈值的
         #     部分归零，只让「真弯」出力 —— 这样 kappa_gain 才敢开大。
