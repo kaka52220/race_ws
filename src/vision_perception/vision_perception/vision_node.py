@@ -99,9 +99,22 @@ class VisionNode(Node):
         m.header = Header()
         m.header.stamp = msg.header.stamp          # 用图像的时间戳，方便和控制对齐
         m.header.frame_id = "base_link"
-        m.lateral_error = float(r["e_m"])
-        m.heading_error = float(r["theta_rad"])
-        m.curvature = float(r["curvature"])
+        # ★ 2026-10-29 实测：tracker 会在两套拟合之间逐帧切换
+        #   （e 在 -1.2/-4.9cm、θ 在 +1.5/-17.5°、κ 在 0.05/1.38 之间跳），
+        #   舵角跟着从 5° 跳到 16°，就是"抽搐"。这里对输出做 5 帧中值滤波。
+        if not hasattr(self, "_hist"):
+            self._hist = []
+        self._hist.append((float(r["e_m"]), float(r["theta_rad"]),
+                           float(r["curvature"]), float(getattr(r, "get", lambda k, d=0: d)("quality", 0.0))))
+        if len(self._hist) > 5:
+            self._hist.pop(0)
+        _e = sorted(h[0] for h in self._hist)[len(self._hist) // 2]
+        _t = sorted(h[1] for h in self._hist)[len(self._hist) // 2]
+        _k = sorted(h[2] for h in self._hist)[len(self._hist) // 2]
+
+        m.lateral_error = float(_e)
+        m.heading_error = float(_t)
+        m.curvature = float(_k)
         m.lane_width = float(r["lane_width_m"])
         m.quality = float(r["quality"])
         m.is_lost = bool(r["is_lost"])

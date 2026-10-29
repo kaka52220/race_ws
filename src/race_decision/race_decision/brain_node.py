@@ -73,13 +73,13 @@ class BrainNode(Node):
         # 0.7 → 1.0：e=15cm 时纠偏角 9.9° → 14.0°。
         # 转向律的权重（0~1）。见下方 on_track 里的说明。
         #   实测：e 平滑可信、theta 乱跳，所以先只用 e。
-        self.declare_parameter("theta_gain", 0.21)  # 实际增益 0.21/0.608=0.35（直道稳定值）   # 航向角权重。
+        self.declare_parameter("theta_gain", 0.12)  # 实际增益 0.21/0.608=0.35（直道稳定值）   # 航向角权重。
         # θ 先夹到 ±这个角度再乘 theta_gain。
         # 实测日志里 θ 会跳到 ±71°，0.3×71 = 21° 的野值。
         self.declare_parameter("theta_clip_deg", 30.0)
         #   ★ 2026-10-24 调通的值：0.3。进弯靠它提前打方向。
         #     设 0 会明显「进弯滞后」（少了 0.3×θ 这一项前馈）。
-        self.declare_parameter("kappa_gain", 1.0)   # 曲率前馈权重（配合死区后可以开大）。
+        self.declare_parameter("kappa_gain", 0.85)   # 曲率前馈权重（配合死区后可以开大）。
         self.declare_parameter("kappa_deadband", 0.30)  # 曲率死区 1/m：|κ| 小于它不出前馈
         #   前馈角 = kappa_gain × atan(0.143 × κ)。
         #   κ=1.5 时：0.5→6.0°，1.0→12.1°。弯道转不过来就往上加。
@@ -111,7 +111,12 @@ class BrainNode(Node):
         self.declare_parameter("lost_hold_min_n", 1)      # 至少几帧历史才沿用。1 = 只要跑过一帧就不回正
         self.declare_parameter("lost_enter_frames", 3)    # 连续丢几帧才进 LOST（滞回，防抖）
         self.declare_parameter("lost_exit_frames", 8)     # 连续好帧几帧才退出 LOST
-        self.declare_parameter("v_stanley_min", 0.30)     # Stanley 分母的速度下限（米/秒）。
+        self.declare_parameter("v_stanley_min", 0.30)
+        # ★ 2026-10-29 实测：手推慢速不压线、正常 0.6m/s 就压线。
+        #   原因是 corr = atan(k*e/v)，v 越大纠偏越弱：
+        #     v=0.30 → e=10cm 纠偏 9.8°；v=0.60 → 只有 5.0°。
+        #   钳住上限后，纠偏不再随速度衰减。
+        self.declare_parameter("v_stanley_max", 0.40)     # Stanley 分母的速度下限（米/秒）。
         # 真车才 0.21 m/s，这个 0.5 只是个「固定参考速度」，让纠偏项退化成纯比例控制，
         # 避免低速时 1/v 把纠偏角放大到 90°（实测出现过 -92.8°）。
         # e 进入控制律前先夹到这个范围（米）。宽区域（广场/路口）视觉给的 e 可能到 1 米，
@@ -538,7 +543,8 @@ class BrainNode(Node):
         # θ 也夹一下：视觉偶尔给出 ±70° 的野值，不限幅就是 0.3×70=21° 的方向突变
         th_max = math.radians(float(g("theta_clip_deg").value))
         th_c = max(-th_max, min(th_max, th))
-        v_eff = max(v_cmd, float(g("v_stanley_min").value))
+        v_eff = min(max(v_cmd, float(g("v_stanley_min").value)),
+                   float(g("v_stanley_max").value))
         corr = math.atan(float(g("stanley_k").value) * e_c / v_eff)
         #   ★ 曲率前馈加死区：直道上 κ 的噪声约 ±0.2，无死区时会被
         #     kappa_gain 直接放大成舵角抖动（画龙）。死区把 |κ| 小于阈值的
