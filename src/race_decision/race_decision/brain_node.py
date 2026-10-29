@@ -111,7 +111,10 @@ class BrainNode(Node):
         #   想减速就调小；0.07 是"急刹爬行"，弯道里会看起来像停车。
         # ★ 丢线时「往哪转往哪转」：参考最近几帧的转向角，不回正。
         #   弯道里一丢线就回正，车会直冲出去（2026-10-24 推车过弯实测）。
-        self.declare_parameter("lost_hold_n", 3)          # 参考最近几帧
+        self.declare_parameter("lost_hold_n", 3)
+        # ★ 2026-10-29 按需求：丢线时「保持原来的角度和速度」而不是降到 lost_speed。
+        #   lost_speed 仍作为下限兜底（防止上一帧速度太小导致车停住）。
+        self.declare_parameter("lost_keep_speed", True)          # 参考最近几帧
         self.declare_parameter("lost_hold_min_n", 1)      # 至少几帧历史才沿用。1 = 只要跑过一帧就不回正
         self.declare_parameter("lost_enter_frames", 3)    # 连续丢几帧才进 LOST（滞回，防抖）
         self.declare_parameter("lost_exit_frames", 8)     # 连续好帧几帧才退出 LOST
@@ -364,7 +367,14 @@ class BrainNode(Node):
         if enter_lost or still_lost:
             self.state = "LOST"
             # 用一个**固定**的爬行速度，而不是在当前速度上乘系数
-            v = 0.0 if hold else float(g("lost_speed").value)
+            # 丢线时保持上一帧速度（按需求），但不超过 max_speed、不低于 lost_speed
+            if hold:
+                v = 0.0
+            elif bool(g("lost_keep_speed").value):
+                v = max(self.v_cmd, float(g("lost_speed").value))
+                v = min(v, float(g("max_speed").value) * float(g("speed_scale").value))
+            else:
+                v = float(g("lost_speed").value)
             # ★ 丢线时不要回正，保持「刚才往哪转」。
             #   原来这里是 publish(v, 0.0) —— 方向盘瞬间回正。
             #   实测后果（2026-10-24 推车过弯）：弯道里一丢线就掰直，
