@@ -578,6 +578,15 @@ class LaneTracker:
         q_both = n0 / max(1, len(side))
         quality = float(q_len * (0.6 + 0.4 * q_both))
 
+        # ★ 2026-10-29 实测（发夹弯入口）：出现过 theta=+61° 而 kappa=-1.35 的自相矛盾，
+        #   两者反号说明左右线配错了（弯道里拟合到另一条边）。此时 kappa 前馈会和
+        #   theta 项互相打架，控制行为不可预测 —— 直接不输出 kappa（置 0），
+        #   只靠 e + theta 走，并把质量打 7 折。
+        th_deg_now = math.degrees(theta)
+        if abs(th_deg_now) > 20.0 and abs(kappa) > 0.5 and th_deg_now * kappa < 0.0:
+            kappa = 0.0
+            quality *= 0.7
+
         out.update({
             "coefL": mid + np.array([0, 0, -half]), "coefR": mid + np.array([0, 0, half]),
             "mid_coef": mid, "mode": mode, "is_lost": False, "reject_reason": "",
