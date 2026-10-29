@@ -46,7 +46,12 @@ class BrainNode(Node):
         self.declare_parameter("wheelbase_m", 0.143)
         self.declare_parameter("steer_max_deg", 32.0)  # 舵角上限。25 时前轮 15.2°→最小半径 0.53m，实测 14.1% 的帧打满，
         # 正常弯道就没余量了。32 → 前轮 19.5°、半径 0.40m。硬件上限 40。
-        self.declare_parameter("steer_trim_deg", 2.5)
+        self.declare_parameter("steer_trim_deg", 0.0)
+        # 2026-10-29 实测转弯半径标定（手推走圆弧量直径）：
+        #   指令 20 度 -> 直径 133cm -> R=0.665 -> 前轮 atan(0.143/0.665)=12.1 度
+        #   指令 10 度 -> 直径 314cm -> R=1.570 -> 前轮 5.2 度
+        #   => 机械比 0.607，线性。delta 是前轮角，发之前必须 /0.608
+        self.declare_parameter("steer_ratio", 0.608)
         # ★ 2026-10-29 实测：左弯 e 中位 -5.9cm、右弯 -5.9cm（都偏右），
         #   直道只偏 -0.5cm → 左右弯都往右跑 = 转向机构恒定右偏。
         #   +2.5° 约修 4cm；代价是直道往左偏约 2.6cm。     # 直线跑偏时调这个
@@ -61,18 +66,18 @@ class BrainNode(Node):
         #   k=1.5 时，e=10cm 就要走 R=0.81 m 的弯 —— 在 54cm 宽车道里等于打半舵。
         #   改 0.7 后：e=5cm → R=3.4m，e=10cm → R=1.7m，e=20cm → R=0.86m。
         #   觉得还不够柔就继续往 0.5 调；觉得跟弯慢就往 1.0 调。
-        self.declare_parameter("stanley_k", 1.0)  # e 增益。它直接用实测的 e，不依赖拟合宽度/曲率。
+        self.declare_parameter("stanley_k", 0.8)  # e 增益。它直接用实测的 e，不依赖拟合宽度/曲率。
         # 赛道宽度变化时提前量(κ)不可靠，加大这个才是"直接多打。
         # 0.7 → 1.0：e=15cm 时纠偏角 9.9° → 14.0°。
         # 转向律的权重（0~1）。见下方 on_track 里的说明。
         #   实测：e 平滑可信、theta 乱跳，所以先只用 e。
-        self.declare_parameter("theta_gain", 0.3)   # 航向角权重。
+        self.declare_parameter("theta_gain", 0.5)   # 航向角权重。
         # θ 先夹到 ±这个角度再乘 theta_gain。
         # 实测日志里 θ 会跳到 ±71°，0.3×71 = 21° 的野值。
         self.declare_parameter("theta_clip_deg", 30.0)
         #   ★ 2026-10-24 调通的值：0.3。进弯靠它提前打方向。
         #     设 0 会明显「进弯滞后」（少了 0.3×θ 这一项前馈）。
-        self.declare_parameter("kappa_gain", 1.15)   # 曲率前馈权重（配合死区后可以开大）。
+        self.declare_parameter("kappa_gain", 1.0)   # 曲率前馈权重（配合死区后可以开大）。
         self.declare_parameter("kappa_deadband", 0.30)  # 曲率死区 1/m：|κ| 小于它不出前馈
         #   前馈角 = kappa_gain × atan(0.143 × κ)。
         #   κ=1.5 时：0.5→6.0°，1.0→12.1°。弯道转不过来就往上加。
@@ -539,8 +544,10 @@ class BrainNode(Node):
         k_dead = float(g("kappa_deadband").value)
         k_eff = math.copysign(max(abs(kappa) - k_dead, 0.0), kappa)
         steer_ff = math.atan(L * k_eff) * float(g("kappa_gain").value)
-        delta = (float(g("theta_gain").value) * th_c - corr + steer_ff
-                 + math.radians(float(g("steer_trim_deg").value)))
+        # 三项都是【前轮转角】，除以机械比换成【舵机角】
+        ratio = max(float(g("steer_ratio").value), 1e-3)
+        delta = ((float(g("theta_gain").value) * th_c - corr + steer_ff
+                  + math.radians(float(g("steer_trim_deg").value))) / ratio)
         delta_raw = delta          # 滤波/限幅前的原始转角，只用于日志诊断
 
         # 限幅
