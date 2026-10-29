@@ -77,7 +77,7 @@ class BrainNode(Node):
         # 0.7 → 1.0：e=15cm 时纠偏角 9.9° → 14.0°。
         # 转向律的权重（0~1）。见下方 on_track 里的说明。
         #   实测：e 平滑可信、theta 乱跳，所以先只用 e。
-        self.declare_parameter("theta_gain", 0.12)  # 实际增益 0.21/0.608=0.35（直道稳定值）   # 航向角权重。
+        self.declare_parameter("theta_gain", 0.25)  # 实际增益 0.21/0.608=0.35（直道稳定值）   # 航向角权重。
         # θ 先夹到 ±这个角度再乘 theta_gain。
         # 实测日志里 θ 会跳到 ±71°，0.3×71 = 21° 的野值。
         self.declare_parameter("theta_clip_deg", 30.0)
@@ -570,6 +570,11 @@ class BrainNode(Node):
         self.e_for_lead = e_c
 
         corr = math.atan(float(g("stanley_k").value) * e_lead / v_eff)
+        # ★ 2026-10-29 实测（折弯处 e=-18cm θ=-47°）：theta 项要往右 -5.6°，
+        #   但 e 项（车在车道外侧）给出 +14.6°，两项相加变 +10° 往左，
+        #   该右转的地方车直行。急折弯里"回到中心"是错的，应先跟车道方向。
+        #   所以按 |θ| 削弱 e 的权重：cos 投影，θ=47° 时降到 0.68，70° 降到 0.34。
+        corr *= max(0.25, math.cos(min(abs(th), math.radians(80.0))))
         #   ★ 曲率前馈加死区：直道上 κ 的噪声约 ±0.2，无死区时会被
         #     kappa_gain 直接放大成舵角抖动（画龙）。死区把 |κ| 小于阈值的
         #     部分归零，只让「真弯」出力 —— 这样 kappa_gain 才敢开大。
