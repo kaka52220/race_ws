@@ -578,6 +578,13 @@ class LaneTracker:
         q_both = n0 / max(1, len(side))
         quality = float(q_len * (0.6 + 0.4 * q_both))
 
+        # ★ 2026-10-29 实测（斑马线后右线出画面）：只剩一条线时视觉配错边，
+        #   画面是左弯却报 kappa=-0.86（符号反），前馈往右打，车冲出蓝色区。
+        #   曲率本质依赖左右线的相对关系，单边界（mode!=0）不可能算准 —— 直接置 0。
+        if mode != 0:
+            kappa = 0.0
+            quality *= 0.8
+
         out.update({
             "coefL": mid + np.array([0, 0, -half]), "coefR": mid + np.array([0, 0, half]),
             "mid_coef": mid, "mode": mode, "is_lost": False, "reject_reason": "",
