@@ -31,7 +31,7 @@ from .lane_params import DEFAULTS
 from .crosswalk import crosswalk_score, red_light_box
 
 
-def _latch_value(owner, key, v, tol, need=6):
+def _latch_value(owner, key, v, tol, need=3):
     """值滞回：新值必须连续出现 need 帧才接受，否则保持当前值。
 
     为什么需要：A 点实测 e/theta/kappa 在「两套解」之间 50/50 交替，
