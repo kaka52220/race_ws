@@ -126,13 +126,13 @@ class BrainNode(MissionMixin, Node):
         # 所以 max_speed=0.12 → 12% → 0.161 m/s。
         # ★ 2026-10-30 按需求：只有出路口那一小段（里程 6.4~8.3m）在"拟合不到"时
         #   用一个固定航向直行 1 秒；其他任何地方仍然保持上次转向（原逻辑不动）。
-        self.declare_parameter("straight_zone_s0", 5.60)      # 窗口起点（里程 m）
-        self.declare_parameter("straight_zone_s1", 8.40)      # 窗口终点
-        self.declare_parameter("straight_hold_s", 0.2)
+        self.declare_parameter("straight_zone_s0", 0.0)      # 窗口起点（里程 m）
+        self.declare_parameter("straight_zone_s1", -1.0)      # 窗口终点
+        self.declare_parameter("straight_hold_s", 0.0)
         # ★ 2026-10-30 按需求：锁航向时的目标航向 = 当前车头 + 这个角度（正=往左）
         self.declare_parameter("straight_hold_yaw_deg", 3.0)        # 拟合不到时直行多少秒
         self.declare_parameter("straight_hold_gain", 3.0)     # 航向保持增益
-        self.declare_parameter("max_speed", 0.60)         # 全局最高速（米/秒）
+        self.declare_parameter("max_speed", 0.55)         # 全局最高速（米/秒）
         self.declare_parameter("min_speed", 0.20)         # 转弯时最低速（米/秒），别停
         self.declare_parameter("speed_scale", 1.0)        # 一键倍率：0.5 = 全部减半
         self.declare_parameter("a_lat", 0.80)
