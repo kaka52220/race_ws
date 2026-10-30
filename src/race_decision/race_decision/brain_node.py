@@ -87,6 +87,14 @@ class BrainNode(MissionMixin, Node):
         #   直接改 x_a（目标点横向），效果一对一，不像改 e 会被 pp_k_e 衰减。
         #   左弯(κ>0) → 目标点往右 → 车往外；右弯(κ<0) → 往左 → 车往外。
         self.declare_parameter("pp_target_offset_m", 0.065)
+        # ★ 2026-10-30 实测：外偏补偿与横向偏移是 1:1（0cm→-6.3cm，5cm→-1.4cm）。
+        #   但圆(R=0.44, κ=2.27)比 S 弯(κ≈1)更急、需要更多，所以让补偿随 |κ| 放大：
+        #   offset = 基准 × min(1.35, |κ|/1.5)
+        #     κ=2.27 → 1.35×  → 8.8cm
+        #     κ=1.5  → 1.00×  → 6.5cm
+        #     κ=1.0  → 0.67×  → 4.3cm
+        self.declare_parameter("pp_offset_kappa_ref", 1.5)
+        self.declare_parameter("pp_offset_kappa_max", 1.35)
         self.declare_parameter("stanley_k", 0.52)
         # ★ 2026-10-29：eval_d 从 0.22 减到 0.10 后 e 失去预瞄，直道画龙。
         #   在控制端加「微分预瞄」补回阻尼：e_lead = e + e_lead_s * de/dt
@@ -682,7 +690,11 @@ class BrainNode(MissionMixin, Node):
                 # 目标点往弯外侧平移（path_x 是右正，κ>0 左弯 → x_a 加正值 = 往右）
                 _k2 = float(getattr(_m, "curvature", 0.0))
                 if abs(_k2) > 0.5:
-                    x_a += math.copysign(float(g("pp_target_offset_m").value), _k2)
+                    _off = float(g("pp_target_offset_m").value)
+                    _ref = max(float(g("pp_offset_kappa_ref").value), 0.1)
+                    _cap = float(g("pp_offset_kappa_max").value)
+                    _off *= min(_cap, abs(_k2) / _ref)      # 急弯多补、缓弯少补
+                    x_a += math.copysign(_off, _k2)
                 if d_a > 0.10 and abs(x_a) < 1.5:
                     # lane_tracker 的 BEV 横轴是「右为正」，而控制器约定「左为正」，
                     # 所以这里要取负号（实测不取负时舵机方向反）。
