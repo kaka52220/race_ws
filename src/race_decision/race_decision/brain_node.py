@@ -124,6 +124,12 @@ class BrainNode(MissionMixin, Node):
         #   speed  8 → 0.106 m/s    speed 12 → 0.161 m/s
         #   speed 10 → 0.138 m/s    speed 15 → 0.208 m/s
         # 所以 max_speed=0.12 → 12% → 0.161 m/s。
+        # ★ 2026-10-30 按需求：只有出路口那一小段（里程 6.4~8.3m）在"拟合不到"时
+        #   用一个固定航向直行 1 秒；其他任何地方仍然保持上次转向（原逻辑不动）。
+        self.declare_parameter("straight_zone_s0", 6.30)      # 窗口起点（里程 m）
+        self.declare_parameter("straight_zone_s1", 8.60)      # 窗口终点
+        self.declare_parameter("straight_hold_s", 1.0)        # 拟合不到时直行多少秒
+        self.declare_parameter("straight_hold_gain", 3.0)     # 航向保持增益
         self.declare_parameter("max_speed", 0.70)         # 全局最高速（米/秒）
         self.declare_parameter("min_speed", 0.20)         # 转弯时最低速（米/秒），别停
         self.declare_parameter("speed_scale", 1.0)        # 一键倍率：0.5 = 全部减半
@@ -395,6 +401,29 @@ class BrainNode(MissionMixin, Node):
         #     这里只看 msg.is_lost，不再重复判 —— 见 06_代码架构与职责边界.md
         if self.mission_step(now, msg, v_max):
             return
+
+        # ── 出路口窗口：拟合不到 → 固定航向直行 1 秒 ──────────────
+        _s_now = getattr(self, "od_s", 0.0)
+        in_zone = (float(g("straight_zone_s0").value)
+                   <= _s_now <= float(g("straight_zone_s1").value))
+        if in_zone and msg.is_lost:
+            if getattr(self, "sh_ref_yaw", None) is None:
+                self.sh_ref_yaw = getattr(self, "od_yaw", 0.0)
+                self.sh_until = now + float(g("straight_hold_s").value)
+                self.get_logger().warn("[STRAIGHT] 窗口内拟合不到 -> 锁航向直行 %.1fs"
+                                       % float(g("straight_hold_s").value),
+                                       throttle_duration_sec=2.0)
+            if now < getattr(self, "sh_until", 0.0):
+                _dy2 = (getattr(self, "od_yaw", 0.0) - self.sh_ref_yaw
+                        + math.pi) % (2.0 * math.pi) - math.pi
+                _d = -float(g("straight_hold_gain").value) * _dy2
+                _lim = math.radians(float(g("steer_max_deg").value))
+                self.state = "STRAIGHT_HOLD"
+                self.publish(float(g("max_speed").value) * float(g("speed_scale").value) * 0.7,
+                             max(-_lim, min(_lim, _d)))
+                return
+        if not in_zone:
+            self.sh_ref_yaw = None      # 离开窗口后清掉，下一圈重新取
 
         if msg.is_lost:
             self.lost_cnt += 1
