@@ -25,7 +25,7 @@ import time
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, TwistStamped
 from Rosmaster_Lib import Rosmaster
 
 
@@ -53,7 +53,7 @@ class BaseDriverNode(Node):
         # 线性度很好，所以用单一常数即可。换车/换固件要重新标。
         self.declare_parameter('mps_per_pct', 0.0134)
         self.declare_parameter('steer_hw_max_deg', 40.0)  # 硬件舵机物理限幅，兜底用
-        self.declare_parameter('debug_log', True)
+        self.declare_parameter('debug_log', False)
 
         self.bot = Rosmaster(com='/dev/robot_base')
         self.bot.create_receive_threading()
@@ -73,6 +73,10 @@ class BaseDriverNode(Node):
         # 看门狗：0.5 秒没收到指令就停车
         self.last_cmd_time = time.time()
         self.create_timer(0.1, self.watchdog)
+
+        # andy: 里程计原始数据（底盘速度 + 陀螺仪），给 brain 的 mission 用
+        self.pub_odom = self.create_publisher(TwistStamped, '/odom_raw', 20)
+        self.create_timer(0.02, self.pub_odom_raw)
 
     def safe_stop(self):
         """停车。连发几次，因为要保证这一帧串口写真的到得了底盘。"""
@@ -102,6 +106,21 @@ class BaseDriverNode(Node):
         if bool(g('debug_log').value):
             self.get_logger().info(
                 f'🚗 {v_mps:.3f}m/s→{spd}% 转角={int(round(steer))}度')
+
+    def pub_odom_raw(self):
+        try:
+            vx, vy, vz = self.bot.get_motion_data()
+            gx, gy, gz = self.bot.get_gyroscope_data()
+        except Exception:
+            return
+        m = TwistStamped()
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.header.frame_id = 'base_link'
+        m.twist.linear.x = float(vx)
+        m.twist.linear.y = float(vy)
+        m.twist.angular.x = float(vz)     # 底盘自己算的角速度，仅日志对照
+        m.twist.angular.z = float(gz)
+        self.pub_odom.publish(m)
 
     def watchdog(self):
         if time.time() - self.last_cmd_time > 0.5:

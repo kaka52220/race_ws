@@ -20,12 +20,13 @@ import time
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
-from std_msgs.msg import Header, Float32
+from std_msgs.msg import Header, Float32, Float32MultiArray
 from cv_bridge import CvBridge
 import numpy as np
 
 from custom_msgs.msg import TrackInfo
 from .lane_tracker import LaneTracker
+from .right_line import RightLine   # andy：避障区右黄线单独拟合
 from .lane_params import DEFAULTS
 from .crosswalk import crosswalk_score, red_light_box
 
@@ -61,6 +62,8 @@ class VisionNode(Node):
 
         self.bridge = CvBridge()
         self.pub_track = self.create_publisher(TrackInfo, "/track", 10)
+        self.rline = RightLine()
+        self.pub_rline = self.create_publisher(Float32MultiArray, "/lane_right", 10)
         self.pub_cw = (self.create_publisher(Float32, "/crosswalk", 10)
                        if self.get_parameter("publish_crosswalk").value else None)
         self.pub_dbg = (self.create_publisher(Image, "/debug/track_image", 2)
@@ -123,6 +126,11 @@ class VisionNode(Node):
         m.n_points = int(r.get("n_pts", 0))
         m.reject_reason = str(r.get("reject_reason", ""))[:120]
         self.pub_track.publish(m)
+        try:
+            rl = self.rline.update(r["mask"], self.tracker.d_of_row, self.tracker.x_of_col)
+            self.pub_rline.publish(Float32MultiArray(data=[float(rl[0]), float(rl[1]), float(rl[2])] if rl else [0.0, 0.0, 0.0]))
+        except Exception as ex:
+            self.get_logger().warn(f"右线拟合失败: {ex}", throttle_duration_sec=5.0)
         # ── 斑马线：地面极亮面积百分比，越大 = 离斑马线越近 ──
         #   阈值法，0 误检（实测 350 张负样本），不需要训练。
         #   >= crosswalk_trigger（默认 8%）= 约 0.7 米内，大脑据此停车。

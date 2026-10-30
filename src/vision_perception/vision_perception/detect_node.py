@@ -103,6 +103,10 @@ class DetectNode(Node):
         self.pub_dbg = (self.create_publisher(Image, "/debug/detect_image", 2)
                         if self.get_parameter("publish_debug").value else None)
         self.last_dbg = 0.0
+        from sensor_msgs.msg import CompressedImage as _CI
+        self._CI = _CI
+        self.pub_dbg_jpg = (self.create_publisher(_CI, "/debug/detect_image/jpeg", 2)
+                            if self.pub_dbg is not None else None)
         self.sub = self.create_subscription(
             Image, self.get_parameter("image_topic").value, self.on_image, 2)
 
@@ -249,7 +253,13 @@ class DetectNode(Node):
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                 cv2.putText(vis, f"n={len(dets)}", (10, 34),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-                self.pub_dbg.publish(self.bridge.cv2_to_imgmsg(vis, "bgr8"))
+                if self.pub_dbg.get_subscription_count() > 0:
+                    self.pub_dbg.publish(self.bridge.cv2_to_imgmsg(vis, "bgr8"))
+                # 推流用的小图：640x360 JPEG ≈ 40 KB（原图 2.7 MB，避障时 DDS 丢帧）
+                ok, jb = cv2.imencode(".jpg", cv2.resize(vis, (640, 360)), [cv2.IMWRITE_JPEG_QUALITY, 70])
+                if ok:
+                    cm = self._CI(); cm.header = msg.header; cm.format = "jpeg"; cm.data = jb.tobytes()
+                    self.pub_dbg_jpg.publish(cm)
 
         self.pub.publish(m)
 

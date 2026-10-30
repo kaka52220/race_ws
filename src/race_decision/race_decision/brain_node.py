@@ -35,9 +35,10 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Float32, String
 from custom_msgs.msg import TrackInfo, Detections
+from .mission import MissionMixin
 
 
-class BrainNode(Node):
+class BrainNode(MissionMixin, Node):
     def __init__(self):
         super().__init__("brain_node")
 
@@ -168,7 +169,7 @@ class BrainNode(Node):
         # ── 斑马线停车（视觉阈值法发 /crosswalk，见 crosswalk.py）──
         #   分数是"地面极亮面积百分比"，越大 = 离斑马线越近。
         #   实测：>=8% 约 0.7 米内；负样本 207 张 / 挡板 143 张零误检。
-        self.declare_parameter("crosswalk_trigger", 18.0)   # 超过这个分数就停车
+        self.declare_parameter("crosswalk_trigger", 14.0)   # 超过这个分数就停车
         # ★ 先减速再停：高速（0.6）冲过来时刹车距离不够，会停在斑马线上。
         #   分数到 crosswalk_slow_trigger 就先把速度压到 crosswalk_slow_speed，
         #   等真到 crosswalk_trigger 再停 —— 这样停得准，又不用把停车阈值降太低。
@@ -180,7 +181,7 @@ class BrainNode(Node):
         #   起步后这段时间内完全不采信 /crosswalk。
         self.declare_parameter("cw_block_dist_m", 0.5)   # 近处有挡板就不看斑马线
 
-        self.declare_parameter("avoid_enable", True)
+        self.declare_parameter("avoid_enable", False)   # andy: 被 mission.av2 取代
         self.declare_parameter("avoid_dist_m", 0.95) # 多远开始往左让（0.55 太近 / 0.70 / 0.75）
         self.declare_parameter("bh_turn_m", 0.20)        # 挡板在我方车道内时固定左偏量
         # ★ 挡板 1 和挡板 2 的唯一稳定区别是画面横向位置 cx：
@@ -220,7 +221,7 @@ class BrainNode(Node):
         #   降到 0.15 → 滑行约 1.2cm。这个参数只影响「接近时的速度」，
         #   不影响触发判定，所以没有误触发风险。
         self.declare_parameter("voice_enable", True)   # 斑马线停车语音播报
-        self.declare_parameter("crosswalk_stop_s", 3.0)    # 停几秒（规则要求 3s）
+        self.declare_parameter("crosswalk_stop_s", 3.3)    # 停几秒（规则要求 3s）
         self.declare_parameter("crosswalk_rearm", 0.6)     # 分数掉到触发值的这个比例以下，才允许下次再停
         # 冷却：停完之后这么多秒内不再触发。防止分数在阈值附近抖动时
         # 反复触发把自己永久锁死（实测过：假值和真值抢话题就会这样）。
@@ -263,6 +264,7 @@ class BrainNode(Node):
         self.n_lost = 0
         self.t_last_log = self.get_clock().now().nanoseconds / 1e9
 
+        self.mission_init()
         period = 1.0 / max(float(self.get_parameter("control_hz").value), 1.0)
         self.timer = self.create_timer(period, self.on_timer)
         self.get_logger().info(
@@ -323,9 +325,10 @@ class BrainNode(Node):
         #   否则停完 3 秒会立刻再触发一次，车就卡在斑马线不动了。
         trig = float(g("crosswalk_trigger").value)
         cool = float(g("crosswalk_cooldown_s").value)
-        if self.cw >= trig and self.cw_armed and cw_ok and now >= self.cw_done_at + cool:
+        if self.cw >= trig and self.cw_armed and cw_ok and getattr(self, "mode", "") != "FINISH" and now >= self.cw_done_at + cool:
             self.cw_stop_until = now + float(g("crosswalk_stop_s").value)
             self.cw_armed = False
+            self.on_crosswalk_event(now)
             # 语音延后到车真正停稳后再播（0.6s 后），
             # 避免音频初始化/USB 声卡唤醒的 CPU 抖动落在刹车那一瞬间。
             if bool(g("voice_enable").value):
@@ -343,7 +346,7 @@ class BrainNode(Node):
             self.publish(0.0, 0.0)
             # 停稳后再播报（此时车已经静止，音频抖动不影响刹车）
             if self.voice_at > 0.0 and now >= self.voice_at:
-                self.pub_voice.publish(String(data="人行道，停车"))
+                self.pub_voice.publish(String(data=str(self.get_parameter("cw_voice_text").value)))
                 self.voice_at = 0.0
             return
         elif self.cw_stop_until > 0.0 and self.cw_done_at < self.cw_stop_until:
@@ -355,6 +358,9 @@ class BrainNode(Node):
         #   给一个固定的 lost_speed，配合 enter/exit 帧数滞回，就平稳了。
         #   ★ 可信度判定（质量、跨度、e/theta/kappa 超限）全部在 vision 做完了，
         #     这里只看 msg.is_lost，不再重复判 —— 见 06_代码架构与职责边界.md
+        if self.mission_step(now, msg, v_max):
+            return
+
         if msg.is_lost:
             self.lost_cnt += 1
             self.ok_cnt = 0
@@ -446,6 +452,9 @@ class BrainNode(Node):
         else:
             v_curve = v_max
         v_target = min(v_max, v_curve)
+        _vc = getattr(self, "m_vcap", None)
+        if _vc is not None:
+            v_target = min(v_target, _vc)
         if v_max > 1e-6:                       # max_speed=0 时不要被 min_speed 抬起来
             v_target = max(v_target, float(g("min_speed").value))
 
@@ -650,6 +659,7 @@ class BrainNode(Node):
     def publish(self, v, omega):
         if bool(self.get_parameter("dry_run").value):
             return                      # 只算不发（车架起来时用）
+        self._cmd_v = float(v)
         t = Twist()
         t.linear.x = float(v)
         t.angular.z = float(omega)
