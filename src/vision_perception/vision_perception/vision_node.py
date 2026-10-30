@@ -31,6 +31,29 @@ from .lane_params import DEFAULTS
 from .crosswalk import crosswalk_score, red_light_box
 
 
+def _latch_value(owner, key, v, tol, need=6):
+    """值滞回：新值必须连续出现 need 帧才接受，否则保持当前值。
+
+    为什么需要：A 点实测 e/theta/kappa 在「两套解」之间 50/50 交替，
+    中值滤波（5 帧）压不住 —— 中值仍然是两者之一。
+    滞回能锁住一套解，只有持续 6 帧（0.2s）的新值才切换。
+    """
+    st = getattr(owner, "_latch_st", None)
+    if st is None:
+        st = {}
+        owner._latch_st = st
+    cur, cnt = st.get(key, (v, 0))
+    if abs(v - cur) <= tol:
+        st[key] = (0.7 * cur + 0.3 * v, 0)     # 同侧 → 轻微跟随
+    else:
+        cnt += 1
+        if cnt >= need:
+            st[key] = (v, 0)                    # 持续够久 → 接受新值
+        else:
+            st[key] = (cur, cnt)                # 否则保持
+    return st[key][0]
+
+
 class VisionNode(Node):
     def __init__(self):
         super().__init__("vision_node")
@@ -115,9 +138,9 @@ class VisionNode(Node):
         _t = sorted(h[1] for h in self._hist)[len(self._hist) // 2]
         _k = sorted(h[2] for h in self._hist)[len(self._hist) // 2]
 
-        m.lateral_error = float(_e)
-        m.heading_error = float(_t)
-        m.curvature = float(_k)
+        m.lateral_error = float(_latch_value(self, "e", _e, 0.03))
+        m.heading_error = float(_latch_value(self, "t", _t, 0.09))
+        m.curvature = float(_latch_value(self, "k", _k, 0.25))
         m.lane_width = float(r["lane_width_m"])
         m.quality = float(r["quality"])
         m.is_lost = bool(r["is_lost"])
