@@ -86,7 +86,7 @@ class BrainNode(MissionMixin, Node):
         #   让车走在真车道中心偏外一点，擦内线时还有余量。
         #   直接改 x_a（目标点横向），效果一对一，不像改 e 会被 pp_k_e 衰减。
         #   左弯(κ>0) → 目标点往右 → 车往外；右弯(κ<0) → 往左 → 车往外。
-        self.declare_parameter("pp_target_offset_m", 0.05)
+        self.declare_parameter("pp_target_offset_m", 0.075)
         self.declare_parameter("stanley_k", 0.52)
         # ★ 2026-10-29：eval_d 从 0.22 减到 0.10 后 e 失去预瞄，直道画龙。
         #   在控制端加「微分预瞄」补回阻尼：e_lead = e + e_lead_s * de/dt
