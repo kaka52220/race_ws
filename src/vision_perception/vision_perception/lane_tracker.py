@@ -599,6 +599,13 @@ class LaneTracker:
         # +1.07 翻成 -1.03（mode=0，两条线都在），舵角因此从 +21.7 甩到 -0.7。
         # 不管几条线，theta 与 kappa 反号且都够大就是不可能的组合 —— kappa 的符号
         # 交给 theta 定（theta 是一阶量，比二阶的曲率可靠）。
+        # ★ 2026-10-30 现场实测（弯入口，车居中）：theta=+9.3°（左）但前方实际右转、
+        #   BEV 拟合几何正确、kappa=-1.50（右）。说明两者反号时错的是 theta。
+        #   → 反号时以 kappa 的符号为准修正 theta（之前是信 theta，方向正好搞反）。
+        if abs(kappa) > 0.5 and abs(math.degrees(theta)) > 5.0 and theta * kappa < 0.0:
+            theta = math.copysign(abs(theta), kappa)
+            quality *= 0.9
+
         if abs(kappa) > 0.2 and abs(math.degrees(theta)) > 15.0 and theta * kappa < 0.0:
             # 单边界时 kappa 的符号不可靠（实测画面左弯却报 -0.86）。
             # 幅度保留，符号改由 theta（一阶量，更可靠）决定 —— 不能直接清零，
