@@ -45,7 +45,7 @@ class BrainNode(MissionMixin, Node):
         # ── 全部可调参数（现场用 ros2 param set 改，立即生效）──
         # 车辆几何
         self.declare_parameter("wheelbase_m", 0.143)
-        self.declare_parameter("steer_max_deg", 32.0)  # 舵角上限。25 时前轮 15.2°→最小半径 0.53m，实测 14.1% 的帧打满，
+        self.declare_parameter("steer_max_deg", 30.0)  # 舵角上限。25 时前轮 15.2°→最小半径 0.53m，实测 14.1% 的帧打满，
         # 正常弯道就没余量了。32 → 前轮 19.5°、半径 0.40m。硬件上限 40。
         self.declare_parameter("steer_trim_deg", 1.2)
         # 2026-10-29 直线实测：e 中位 -4.8cm、w 均值 +1.9 度，说明机械恒定右偏，
@@ -77,7 +77,7 @@ class BrainNode(MissionMixin, Node):
         # ★ 2026-10-30：纯追踪跟踪的是「相对车体的路径」，车横向偏了路径也跟着偏，
         #   所以它天然不纠正横向偏差（实测 e=-30cm 时舵角只给 -2.4 度）。
         #   加一个 Stanley 式的横向纠偏项补上这个缺口。
-        self.declare_parameter("pp_k_e", 0.25)
+        self.declare_parameter("pp_k_e", 0.40)
         # ★ 2026-10-30 实拍确认：左右弯都往内线切。纯追踪的固有稳态误差
         #   offset ≈ la²·κ/2 = 0.31²×2.27/2 ≈ 11cm —— 和实测压内线量级一致。
         #   所以按曲率给一个"向外"的固定补偿：κ 越大减的舵角越多。
