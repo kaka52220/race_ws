@@ -82,6 +82,12 @@ class BrainNode(MissionMixin, Node):
         #   offset ≈ la²·κ/2 = 0.31²×2.27/2 ≈ 11cm —— 和实测压内线量级一致。
         #   所以按曲率给一个"向外"的固定补偿：κ 越大减的舵角越多。
         self.declare_parameter("pp_curve_bias_deg", 2.5)
+        # ★ 2026-10-30 按需求：弯道里把 e 的整体目标往外侧偏一点。
+        #   左弯(κ>0) → e 目标往右 → e_use 变得更正 → 控制器往右打 → 车往外
+        #   右弯(κ<0) → e 目标往左 → e_use 变得更负 → 控制器往左打 → 车往外
+        #   与 pp_curve_bias_deg 互补：这个偏的是"目标位置"，
+        #   pp_curve_bias_deg 偏的是"转向量"。
+        self.declare_parameter("curve_e_offset_m", 0.02)
         self.declare_parameter("stanley_k", 0.52)
         # ★ 2026-10-29：eval_d 从 0.22 减到 0.10 后 e 失去预瞄，直道画龙。
         #   在控制端加「微分预瞄」补回阻尼：e_lead = e + e_lead_s * de/dt
@@ -686,6 +692,10 @@ class BrainNode(MissionMixin, Node):
                     # 否则纯追踪的纠偏少了这层补偿，力度不足。
                     e_now = (float(getattr(_m, "lateral_error", 0.0))
                              * float(g("e_gain").value) - float(g("e_bias_m").value))
+                    # 弯道目标外偏：把"目标中心"往弯外侧挪一点
+                    _kc = float(getattr(_m, "curvature", 0.0))
+                    if abs(_kc) > 0.5:
+                        e_now += math.copysign(float(g("curve_e_offset_m").value), _kc)
                     v_for_e = max(v_cmd, float(g("v_stanley_min").value))
                     d_e = math.atan2(float(g("pp_k_e").value) * e_now / v_for_e, 1.0)
                     delta = (d_pp + d_e) / ratio
