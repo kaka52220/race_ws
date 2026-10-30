@@ -81,12 +81,12 @@ class BrainNode(MissionMixin, Node):
         # ★ 2026-10-30 实拍确认：左右弯都往内线切。纯追踪的固有稳态误差
         #   offset ≈ la²·κ/2 = 0.31²×2.27/2 ≈ 11cm —— 和实测压内线量级一致。
         #   所以按曲率给一个"向外"的固定补偿：κ 越大减的舵角越多。
-        self.declare_parameter("pp_curve_bias_deg", 2.5)
+        self.declare_parameter("pp_curve_bias_deg", 0.0)
         # ★ 2026-10-30 按需求：弯道里把纯追踪的"目标点"往弯外侧挪，
         #   让车走在真车道中心偏外一点，擦内线时还有余量。
         #   直接改 x_a（目标点横向），效果一对一，不像改 e 会被 pp_k_e 衰减。
         #   左弯(κ>0) → 目标点往右 → 车往外；右弯(κ<0) → 往左 → 车往外。
-        self.declare_parameter("pp_target_offset_m", 0.05)
+        self.declare_parameter("pp_target_offset_m", 0.0)
         self.declare_parameter("stanley_k", 0.52)
         # ★ 2026-10-29：eval_d 从 0.22 减到 0.10 后 e 失去预瞄，直道画龙。
         #   在控制端加「微分预瞄」补回阻尼：e_lead = e + e_lead_s * de/dt
