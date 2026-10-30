@@ -682,14 +682,11 @@ class BrainNode(MissionMixin, Node):
                 # 目标点往弯外侧平移（path_x 是右正，κ>0 左弯 → x_a 加正值 = 往右）
                 _k2 = float(getattr(_m, "curvature", 0.0))
                 if abs(_k2) > 0.5:
-                    # path_x 左正：左弯(κ>0)要让目标点往右 → x_a 减小
-                    x_a -= math.copysign(float(g("pp_target_offset_m").value), _k2)
+                    x_a += math.copysign(float(g("pp_target_offset_m").value), _k2)
                 if d_a > 0.10 and abs(x_a) < 1.5:
                     # lane_tracker 的 BEV 横轴是「右为正」，而控制器约定「左为正」，
                     # 所以这里要取负号（实测不取负时舵机方向反）。
-                    # 2026-10-30 实测：右弯(κ=-1.66)时 x_a=-0.040 却算出 alpha=+5°
-                    # 往左打，与"目标在右侧"矛盾 → 说明 path_x 已经是左正，不该再取负。
-                    alpha = math.atan2(x_a, d_a)
+                    alpha = math.atan2(-x_a, d_a)
                     self.get_logger().info(
                         "[PP] la=%.2f d_a=%.2f x_a=%+.3f alpha=%+.1fdeg off=%.3f k=%+.2f"
                         % (la, d_a, x_a, math.degrees(alpha),
