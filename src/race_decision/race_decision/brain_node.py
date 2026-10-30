@@ -130,7 +130,7 @@ class BrainNode(MissionMixin, Node):
         self.declare_parameter("straight_zone_s1", 8.40)      # 窗口终点
         self.declare_parameter("straight_hold_s", 0.2)
         # ★ 2026-10-30 按需求：锁航向时的目标航向 = 当前车头 + 这个角度（正=往左）
-        self.declare_parameter("straight_hold_yaw_deg", 23.0)        # 拟合不到时直行多少秒
+        self.declare_parameter("straight_hold_yaw_deg", 3.0)        # 拟合不到时直行多少秒
         self.declare_parameter("straight_hold_gain", 3.0)     # 航向保持增益
         self.declare_parameter("max_speed", 0.60)         # 全局最高速（米/秒）
         self.declare_parameter("min_speed", 0.20)         # 转弯时最低速（米/秒），别停
