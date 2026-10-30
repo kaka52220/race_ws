@@ -73,7 +73,7 @@ class BrainNode(MissionMixin, Node):
         #   动机：Stanley 用的是瞬时 e/theta，视觉一帧跳 40cm 舵角就甩 30 度；
         #   纯追踪跟踪的是**路径上**前方 look-ahead 的点，天然连续。
         self.declare_parameter("use_pp", True)
-        self.declare_parameter("pp_lookahead_m", 0.55)
+        self.declare_parameter("pp_lookahead_m", 0.31)
         # ★ 2026-10-30：纯追踪跟踪的是「相对车体的路径」，车横向偏了路径也跟着偏，
         #   所以它天然不纠正横向偏差（实测 e=-30cm 时舵角只给 -2.4 度）。
         #   加一个 Stanley 式的横向纠偏项补上这个缺口。
@@ -107,7 +107,7 @@ class BrainNode(MissionMixin, Node):
         #   speed  8 → 0.106 m/s    speed 12 → 0.161 m/s
         #   speed 10 → 0.138 m/s    speed 15 → 0.208 m/s
         # 所以 max_speed=0.12 → 12% → 0.161 m/s。
-        self.declare_parameter("max_speed", 0.60)         # 全局最高速（米/秒）
+        self.declare_parameter("max_speed", 0.45)         # 全局最高速（米/秒）
         self.declare_parameter("min_speed", 0.20)         # 转弯时最低速（米/秒），别停
         self.declare_parameter("speed_scale", 1.0)        # 一键倍率：0.5 = 全部减半
         self.declare_parameter("a_lat", 0.30)
