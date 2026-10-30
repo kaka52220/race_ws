@@ -412,6 +412,7 @@ class BrainNode(MissionMixin, Node):
 
         self.state = "CRUISING"
         kappa = float(msg.curvature)
+        q_msg = float(getattr(msg, "quality", 1.0))
         e = float(msg.lateral_error)
         th = float(msg.heading_error)
 
@@ -419,6 +420,16 @@ class BrainNode(MissionMixin, Node):
         q_now = float(getattr(msg, "quality", 1.0))
         if q_now < float(g("quality_gate").value) and self.e_prev is not None:
             e = self.e_prev
+        # ★ 2026-10-30 实测（路口出口 t=8.3s）：q=0.00 的帧 theta=+57/kappa=+2.01
+        #   仍然被使用，舵角猛打 +30 度，车往左冲。q 低时三个量必须一起冻结。
+        if q_now < float(g("quality_gate").value):
+            if getattr(self, "th_prev_ctrl", None) is not None:
+                th = self.th_prev_ctrl
+            if getattr(self, "k_prev_ctrl", None) is not None:
+                kappa = self.k_prev_ctrl
+        else:
+            self.th_prev_ctrl = th
+            self.k_prev_ctrl = kappa
 
         # ── e 单帧跳变保护 ──
         #   33ms 内车最多走 1.3cm，e 跳超过 e_jump_max_m 说明视觉锁错线了。
