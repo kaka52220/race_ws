@@ -54,7 +54,7 @@ class BrainNode(MissionMixin, Node):
         #   指令 20 度 -> 直径 133cm -> R=0.665 -> 前轮 atan(0.143/0.665)=12.1 度
         #   指令 10 度 -> 直径 314cm -> R=1.570 -> 前轮 5.2 度
         #   => 机械比 0.607，线性。delta 是前轮角，发之前必须 /0.608
-        self.declare_parameter("steer_ratio", 0.62)
+        self.declare_parameter("steer_ratio", 0.70)
         # ★ 2026-10-29 实测：左弯 e 中位 -5.9cm、右弯 -5.9cm（都偏右），
         #   直道只偏 -0.5cm → 左右弯都往右跑 = 转向机构恒定右偏。
         #   +2.5° 约修 4cm；代价是直道往左偏约 2.6cm。     # 直线跑偏时调这个
@@ -97,7 +97,7 @@ class BrainNode(MissionMixin, Node):
         self.declare_parameter("theta_clip_deg", 30.0)
         #   ★ 2026-10-24 调通的值：0.3。进弯靠它提前打方向。
         #     设 0 会明显「进弯滞后」（少了 0.3×θ 这一项前馈）。
-        self.declare_parameter("kappa_gain", 1.00)   # 曲率前馈权重（配合死区后可以开大）。
+        self.declare_parameter("kappa_gain", 0.85)   # 曲率前馈权重（配合死区后可以开大）。
         self.declare_parameter("kappa_deadband", 0.15)  # 曲率死区 1/m：|κ| 小于它不出前馈
         #   前馈角 = kappa_gain × atan(0.143 × κ)。
         #   κ=1.5 时：0.5→6.0°，1.0→12.1°。弯道转不过来就往上加。
