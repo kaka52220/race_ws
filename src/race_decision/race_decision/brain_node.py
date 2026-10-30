@@ -583,6 +583,14 @@ class BrainNode(MissionMixin, Node):
         self.e_for_lead = e_c
 
         corr = math.atan(float(g("stanley_k").value) * e_lead / v_eff)
+
+        # ★ 2026-10-30 实测（S 弯 t=6.1s）：theta=+45° 该左转，但 e=+10~41cm
+
+        #   的 Stanley 纠偏往右，两项抵消后舵角只剩 +2.7° —— 车"没打算转"。
+
+        #   航向偏得越多，横向纠偏越不该抢主导（车先要把车头摆正）。
+
+        corr *= max(0.25, math.cos(min(abs(th), math.radians(80.0))))
         # ★ 2026-10-29 实测（折弯处 e=-18cm θ=-47°）：theta 项要往右 -5.6°，
         #   但 e 项（车在车道外侧）给出 +14.6°，两项相加变 +10° 往左，
         #   该右转的地方车直行。急折弯里"回到中心"是错的，应先跟车道方向。
