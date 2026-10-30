@@ -94,7 +94,7 @@ class BrainNode(MissionMixin, Node):
         #     κ=1.5  → 1.00×  → 6.5cm
         #     κ=1.0  → 0.67×  → 4.3cm
         self.declare_parameter("pp_offset_kappa_ref", 1.5)
-        self.declare_parameter("pp_offset_kappa_max", 1.45)
+        self.declare_parameter("pp_offset_kappa_max", 1.35)
         self.declare_parameter("stanley_k", 0.52)
         # ★ 2026-10-29：eval_d 从 0.22 减到 0.10 后 e 失去预瞄，直道画龙。
         #   在控制端加「微分预瞄」补回阻尼：e_lead = e + e_lead_s * de/dt
