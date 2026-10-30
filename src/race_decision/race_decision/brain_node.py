@@ -78,6 +78,10 @@ class BrainNode(MissionMixin, Node):
         #   所以它天然不纠正横向偏差（实测 e=-30cm 时舵角只给 -2.4 度）。
         #   加一个 Stanley 式的横向纠偏项补上这个缺口。
         self.declare_parameter("pp_k_e", 0.25)
+        # ★ 2026-10-30 实拍确认：左右弯都往内线切。纯追踪的固有稳态误差
+        #   offset ≈ la²·κ/2 = 0.31²×2.27/2 ≈ 11cm —— 和实测压内线量级一致。
+        #   所以按曲率给一个"向外"的固定补偿：κ 越大减的舵角越多。
+        self.declare_parameter("pp_curve_bias_deg", 2.5)
         self.declare_parameter("stanley_k", 0.52)
         # ★ 2026-10-29：eval_d 从 0.22 减到 0.10 后 e 失去预瞄，直道画龙。
         #   在控制端加「微分预瞄」补回阻尼：e_lead = e + e_lead_s * de/dt
@@ -676,8 +680,18 @@ class BrainNode(MissionMixin, Node):
                              * float(g("e_gain").value) - float(g("e_bias_m").value))
                     v_for_e = max(v_cmd, float(g("v_stanley_min").value))
                     d_e = math.atan2(float(g("pp_k_e").value) * e_now / v_for_e, 1.0)
-                    delta = (d_pp + d_e
-                             + math.radians(float(g("steer_trim_deg").value))) / ratio
+                    delta = (d_pp + d_e) / ratio
+                    # 弯道向外补偿：车在弯里总是切内线，按曲率少打一点方向。
+                    #   κ>0（左弯）→ delta 减小 → 车往右（外侧）
+                    #   κ<0（右弯）→ delta 增大 → 车往左（外侧）
+                    _kk = float(getattr(_m, "curvature", 0.0))
+                    if abs(_kk) > 0.4:
+                        _bias = math.radians(float(g("pp_curve_bias_deg").value))
+                        delta -= math.copysign(_bias, _kk) / ratio
+                        # 补偿量随曲率饱和：κ=0.4 起效，κ>=2.0 全量
+                        _sc = min(1.0, (abs(_kk) - 0.4) / 1.6)
+                        delta += math.copysign(_bias * (1.0 - _sc), _kk) / ratio
+                    delta += math.radians(float(g("steer_trim_deg").value)) / ratio
         delta_raw = delta          # 滤波/限幅前的原始转角，只用于日志诊断
 
         # 限幅
