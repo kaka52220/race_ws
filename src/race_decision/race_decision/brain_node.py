@@ -253,7 +253,13 @@ class BrainNode(MissionMixin, Node):
         # ★ 2026-10-30 实测：车停在斑马线正上方时 cw 分数一直很高，
         #   冷却结束后必然重触发，表现为 STOP_CROSSWALK 反复出现（178 帧/5.9 秒）。
         #   改成：停完之后必须再前进这么远（里程）才重新武装。
-        self.declare_parameter("crosswalk_rearm_dist_m", 0.60)     # 分数掉到触发值的这个比例以下，才允许下次再停
+        self.declare_parameter("crosswalk_rearm_dist_m", 0.60)
+        # ★ 2026-10-30 实测：出路口这段视觉会把"直行"报成左弯（theta/κ 为正），
+        #   车被往左打然后自己往右偏 8cm。所以过完斑马线后先锁航向直行一段，
+        #   不看视觉。目标航向取"起步那一瞬间的车头方向"，不需要人工给角度。
+        self.declare_parameter("xing_after_cw", True)
+        self.declare_parameter("xing_dist_m", 1.20)      # 锁航向走多远
+        self.declare_parameter("xing_yaw_gain", 2.5)     # 航向保持的增益     # 分数掉到触发值的这个比例以下，才允许下次再停
         # 冷却：停完之后这么多秒内不再触发。防止分数在阈值附近抖动时
         # 反复触发把自己永久锁死（实测过：假值和真值抢话题就会这样）。
         self.declare_parameter("crosswalk_cooldown_s", 1.0)
@@ -360,6 +366,7 @@ class BrainNode(MissionMixin, Node):
             self.cw_stop_until = now + float(g("crosswalk_stop_s").value)
             self.cw_armed = False
             self.cw_stop_s_at = getattr(self, "od_s", 0.0)   # 停车时的里程
+            self.xing_yaw_ref = None      # 起步时再取（停车期间车不动，取更准）
             self.on_crosswalk_event(now)
             # 语音延后到车真正停稳后再播（0.6s 后），
             # 避免音频初始化/USB 声卡唤醒的 CPU 抖动落在刹车那一瞬间。
@@ -393,6 +400,33 @@ class BrainNode(MissionMixin, Node):
         #   给一个固定的 lost_speed，配合 enter/exit 帧数滞回，就平稳了。
         #   ★ 可信度判定（质量、跨度、e/theta/kappa 超限）全部在 vision 做完了，
         #     这里只看 msg.is_lost，不再重复判 —— 见 06_代码架构与职责边界.md
+        # ── 出路口锁航向直行 ──────────────────────────────────────
+        #   斑马线停完 + 前进 1.2m 之内：不看视觉，用里程计航向保持直线。
+        if bool(g("xing_after_cw").value) \
+                and getattr(self, "cw_stop_s_at", None) is not None:
+            ds = getattr(self, "od_s", 0.0) - self.cw_stop_s_at
+            if 0.0 <= ds < float(g("xing_dist_m").value):
+                if getattr(self, "xing_yaw_ref", None) is None:
+                    self.xing_yaw_ref = getattr(self, "od_yaw", 0.0)
+                    self.get_logger().warn(
+                        "[XING] 锁航向直行 %.1fm，目标 yaw=%.1f°"
+                        % (float(g("xing_dist_m").value),
+                           math.degrees(self.xing_yaw_ref)),
+                        throttle_duration_sec=5.0)
+                # 航向误差 -> 舵角（左正：yaw 偏左为正，要往右回）
+                _dy = (getattr(self, "od_yaw", 0.0) - self.xing_yaw_ref
+                       + math.pi) % (2.0 * math.pi) - math.pi
+                e_yaw = _dy
+                steer_cmd = -float(g("xing_yaw_gain").value) * e_yaw
+                steer_cmd = max(-math.radians(float(g("steer_max_deg").value)),
+                                min(math.radians(float(g("steer_max_deg").value)), steer_cmd))
+                self.state = "XING"
+                self.publish(float(g("max_speed").value) * float(g("speed_scale").value) * 0.8,
+                             steer_cmd)
+                return
+            elif ds >= float(g("xing_dist_m").value):
+                self.cw_stop_s_at = None      # 这段结束，恢复视觉控制
+
         if self.mission_step(now, msg, v_max):
             return
 
