@@ -54,7 +54,7 @@ class BrainNode(MissionMixin, Node):
         #   指令 20 度 -> 直径 133cm -> R=0.665 -> 前轮 atan(0.143/0.665)=12.1 度
         #   指令 10 度 -> 直径 314cm -> R=1.570 -> 前轮 5.2 度
         #   => 机械比 0.607，线性。delta 是前轮角，发之前必须 /0.608
-        self.declare_parameter("steer_ratio", 0.68)
+        self.declare_parameter("steer_ratio", 0.62)
         # ★ 2026-10-29 实测：左弯 e 中位 -5.9cm、右弯 -5.9cm（都偏右），
         #   直道只偏 -0.5cm → 左右弯都往右跑 = 转向机构恒定右偏。
         #   +2.5° 约修 4cm；代价是直道往左偏约 2.6cm。     # 直线跑偏时调这个
@@ -150,7 +150,7 @@ class BrainNode(MissionMixin, Node):
         # quality 低于此值时，这一帧的 e 不采信（沿用上一帧）。
         # 实测：路口 / 丢线边缘 quality 会掉到 0.3~0.5，此时的 e 会跳 ±30cm，
         # 直接喂进控制就是"抽搐"。
-        self.declare_parameter("quality_gate", 0.45)
+        self.declare_parameter("quality_gate", 0.55)
         #   连续这么多帧都跳，说明是真位移（车真的偏了），就接受
         # ★ 横向偏置：车在弯里系统性偏右（稳态误差），用这个把目标点往左挪。
         #   e_use = e - e_bias_m。正值 = 让车往左走。
