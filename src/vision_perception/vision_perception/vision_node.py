@@ -141,6 +141,11 @@ class VisionNode(Node):
         m.lateral_error = float(_latch_value(self, "e", _e, 0.03))
         m.heading_error = float(_latch_value(self, "t", _t, 0.09))
         m.curvature = float(_latch_value(self, "k", _k, 0.25))
+        # 中心线点列表（供控制端做纯追踪）。C 是 (d, x) 的 Nx2 数组
+        _p = r.get("path") if hasattr(r, "get") else None
+        if _p is not None and len(_p):
+            m.path_d = [float(t[0]) for t in _p]
+            m.path_x = [float(t[1]) for t in _p]
         m.lane_width = float(r["lane_width_m"])
         m.quality = float(r["quality"])
         m.is_lost = bool(r["is_lost"])

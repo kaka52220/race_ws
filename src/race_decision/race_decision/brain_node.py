@@ -69,6 +69,12 @@ class BrainNode(MissionMixin, Node):
         #   k=1.5 时，e=10cm 就要走 R=0.81 m 的弯 —— 在 54cm 宽车道里等于打半舵。
         #   改 0.7 后：e=5cm → R=3.4m，e=10cm → R=1.7m，e=20cm → R=0.86m。
         #   觉得还不够柔就继续往 0.5 调；觉得跟弯慢就往 1.0 调。
+        # ★ 2026-10-30：纯追踪（Pure Pursuit）开关。默认关闭，可随时对比。
+        #   动机：Stanley 用的是瞬时 e/theta，视觉一帧跳 40cm 舵角就甩 30 度；
+        #   纯追踪跟踪的是**路径上**前方 look-ahead 的点，天然连续。
+        self.declare_parameter("use_pp", False)
+        self.declare_parameter("pp_lookahead_m", 0.55)
+        self.declare_parameter("wheelbase_m", 0.143)
         self.declare_parameter("stanley_k", 0.52)
         # ★ 2026-10-29：eval_d 从 0.22 减到 0.10 后 e 失去预瞄，直道画龙。
         #   在控制端加「微分预瞄」补回阻尼：e_lead = e + e_lead_s * de/dt
@@ -620,6 +626,32 @@ class BrainNode(MissionMixin, Node):
         _tg += float(g("theta_gain_kink").value) * min(1.0, abs(math.degrees(th)) / 45.0)
         delta = ((_tg * th_c - corr + steer_ff
                   + math.radians(float(g("steer_trim_deg").value))) / ratio)
+
+        # ── 纯追踪（可选）────────────────────────────────────────────
+        # 在中心线路径上取前方 look-ahead 处的一个点，用几何公式算前轮角：
+        #   alpha = atan2(x_ahead, d_ahead)         该点相对车头的方位
+        #   delta_wheel = atan2(2·L·sin(alpha), la)  纯追踪标准公式
+        # 路径点连续 → 输出天然平滑，不会像 e 那样逐帧甩动。
+        if bool(g("use_pp").value):
+            _m = getattr(self, "_msg", None)
+            _pd = getattr(_m, "path_d", None) if _m is not None else None
+            _px = getattr(_m, "path_x", None) if _m is not None else None
+            if _pd and _px and len(_pd) >= 3 and not _m.is_lost:
+                la = max(float(g("pp_lookahead_m").value), 0.20)
+                k_best = 0
+                best = 1e9
+                for i in range(len(_pd)):
+                    dd = abs(float(_pd[i]) - la)
+                    if dd < best:
+                        best = dd
+                        k_best = i
+                d_a = float(_pd[k_best])
+                x_a = float(_px[k_best])
+                if d_a > 0.10 and abs(x_a) < 1.5:
+                    alpha = math.atan2(x_a, d_a)
+                    Lw = float(g("wheelbase_m").value)
+                    delta = (math.atan2(2.0 * Lw * math.sin(alpha), la)
+                             + math.radians(float(g("steer_trim_deg").value))) / ratio
         delta_raw = delta          # 滤波/限幅前的原始转角，只用于日志诊断
 
         # 限幅
