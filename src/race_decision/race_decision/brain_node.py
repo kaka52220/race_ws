@@ -73,7 +73,7 @@ class BrainNode(MissionMixin, Node):
         #   动机：Stanley 用的是瞬时 e/theta，视觉一帧跳 40cm 舵角就甩 30 度；
         #   纯追踪跟踪的是**路径上**前方 look-ahead 的点，天然连续。
         self.declare_parameter("use_pp", True)
-        self.declare_parameter("pp_lookahead_m", 0.40)
+        self.declare_parameter("pp_lookahead_m", 0.55)
         self.declare_parameter("stanley_k", 0.52)
         # ★ 2026-10-29：eval_d 从 0.22 减到 0.10 后 e 失去预瞄，直道画龙。
         #   在控制端加「微分预瞄」补回阻尼：e_lead = e + e_lead_s * de/dt
