@@ -97,7 +97,7 @@ class BrainNode(MissionMixin, Node):
         self.declare_parameter("theta_clip_deg", 30.0)
         #   ★ 2026-10-24 调通的值：0.3。进弯靠它提前打方向。
         #     设 0 会明显「进弯滞后」（少了 0.3×θ 这一项前馈）。
-        self.declare_parameter("kappa_gain", 1.00)   # 曲率前馈权重（配合死区后可以开大）。
+        self.declare_parameter("kappa_gain", 1.40)   # 曲率前馈权重（配合死区后可以开大）。
         self.declare_parameter("kappa_deadband", 0.15)  # 曲率死区 1/m：|κ| 小于它不出前馈
         #   前馈角 = kappa_gain × atan(0.143 × κ)。
         #   κ=1.5 时：0.5→6.0°，1.0→12.1°。弯道转不过来就往上加。

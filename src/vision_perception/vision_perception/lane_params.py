@@ -86,7 +86,7 @@ DEFAULTS = {
     "theta_limit_deg": 110.0,
     "mode_hold_frames": 8,      # mode 从单边界回到双边需要连续几帧（滞回，防抖）  # 急弯里车被甩到外侧时，车道方向真的能到 80~90°（实拍 lap2_0130 等）
     # 最小转弯半径：前轮最大实际 15.2°（舵机 25° 指令），R=0.143/tan15.2°=0.53 m
-    "max_curvature_1pm": 2.5,
+    "max_curvature_1pm": 3.5,
 
     "debug_scale": 1.0,
 }
