@@ -130,7 +130,7 @@ class BrainNode(MissionMixin, Node):
         self.declare_parameter("straight_zone_s1", -1.0)      # 窗口终点
         self.declare_parameter("straight_hold_s", 0.0)        # 拟合不到时直行多少秒
         self.declare_parameter("straight_hold_gain", 3.0)     # 航向保持增益
-        self.declare_parameter("max_speed", 0.65)         # 全局最高速（米/秒）
+        self.declare_parameter("max_speed", 0.60)         # 全局最高速（米/秒）
         self.declare_parameter("min_speed", 0.20)         # 转弯时最低速（米/秒），别停
         self.declare_parameter("speed_scale", 1.0)        # 一键倍率：0.5 = 全部减半
         self.declare_parameter("a_lat", 0.80)
