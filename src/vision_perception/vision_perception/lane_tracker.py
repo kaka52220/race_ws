@@ -616,15 +616,6 @@ class LaneTracker:
             "path_len_m": length,
         })
 
-        # ★ 2026-10-30 实测（A 点 t=31.8s 附近，连续 60 帧）：路径只走出 0.06 m
-        #   就"前方被黄线挡住"，但多数帧仍然 lost=0，e 在 ±60cm、theta 在 -92~+42 度
-        #   之间逐帧乱跳，直接喂给控制器就把车带出赛道。
-        #   路径太短（<0.35 m）时拟合必然不可信 —— 一律判丢线，让上层保持转向。
-        if length < float(p.get("min_valid_path_m", 0.35)):
-            out.update(is_lost=True,
-                       reject_reason="路径太短 %.2f m（拟合不可信）" % length)
-            quality *= 0.3
-
         limit = min(lane_w / 2 + p["e_margin_m"], p["e_abs_limit_m"])
         if abs(out["e_m"]) > limit:
             out.update(is_lost=True, reject_reason=f"e={out['e_m']*100:+.0f}cm 超出车道")
