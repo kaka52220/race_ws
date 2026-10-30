@@ -606,6 +606,22 @@ class LaneTracker:
             kappa = math.copysign(abs(kappa), theta)
             quality *= 0.9
 
+        # ★ 2026-10-30 实测（路口推车 7073 帧）：路口左边有分支赛道时，视觉会把
+        #   分支的黄线当本车道左边界，theta 冲到 -100°、kappa 填满、e 到 ±30cm，
+        #   车被往左带。kappa 符号翻转 25 次、mode 只有 42% 是双边。
+        #   对策：目标跟踪思路 —— 新的中心线必须落在上一帧预测的附近（默认 ±15cm）。
+        #   偏离太多说明跳到别的分支了，判丢线，让上层保持转向。
+        tol_m = float(p.get("continuity_tol_m", 0.15))
+        if self.prev_seed_x is not None and self.prev_dir is not None:
+            pred_d = self.prev_seed_x
+            if abs(float(xe) - pred_d) > tol_m:
+                out.update(is_lost=True,
+                           reject_reason="中心线跳变 %.0fcm（可能配到别的分支）"
+                                         % ((float(xe) - pred_d) * 100))
+                quality *= 0.3
+                # 不更新 prev_seed_x，保持上一帧的锚点
+                self.prev_seed_x = pred_d if not np.isfinite(pred_d) else pred_d
+
         out.update({
             "coefL": mid + np.array([0, 0, -half]), "coefR": mid + np.array([0, 0, half]),
             "mid_coef": mid, "mode": mode, "is_lost": False, "reject_reason": "",
