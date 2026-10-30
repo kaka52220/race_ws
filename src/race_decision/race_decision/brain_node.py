@@ -73,7 +73,7 @@ class BrainNode(MissionMixin, Node):
         #   动机：Stanley 用的是瞬时 e/theta，视觉一帧跳 40cm 舵角就甩 30 度；
         #   纯追踪跟踪的是**路径上**前方 look-ahead 的点，天然连续。
         self.declare_parameter("use_pp", True)
-        self.declare_parameter("pp_lookahead_m", 0.55)
+        self.declare_parameter("pp_lookahead_m", 0.48)
         # ★ 2026-10-30：纯追踪跟踪的是「相对车体的路径」，车横向偏了路径也跟着偏，
         #   所以它天然不纠正横向偏差（实测 e=-30cm 时舵角只给 -2.4 度）。
         #   加一个 Stanley 式的横向纠偏项补上这个缺口。
