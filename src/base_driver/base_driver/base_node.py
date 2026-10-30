@@ -51,7 +51,7 @@ class BaseDriverNode(Node):
         # 标定来源（tools/ground_run_test.py，落地编码器实测，2026-10-24）：
         #     1% → 0.0134 m/s   8% → 0.106   12% → 0.161   15% → 0.208
         # 线性度很好，所以用单一常数即可。换车/换固件要重新标。
-        self.declare_parameter('mps_per_pct', 0.0134)
+        self.declare_parameter('mps_per_pct', 0.0096)
         self.declare_parameter('steer_hw_max_deg', 40.0)  # 硬件舵机物理限幅，兜底用
         self.declare_parameter('debug_log', False)
 
