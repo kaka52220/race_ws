@@ -128,7 +128,7 @@ class BrainNode(MissionMixin, Node):
         #   用一个固定航向直行 1 秒；其他任何地方仍然保持上次转向（原逻辑不动）。
         self.declare_parameter("straight_zone_s0", 0.0)      # 窗口起点（里程 m）
         self.declare_parameter("straight_zone_s1", -1.0)      # 窗口终点
-        self.declare_parameter("straight_hold_s", 0.5)        # 拟合不到时直行多少秒
+        self.declare_parameter("straight_hold_s", 0.0)        # 拟合不到时直行多少秒
         self.declare_parameter("straight_hold_gain", 3.0)     # 航向保持增益
         self.declare_parameter("max_speed", 0.65)         # 全局最高速（米/秒）
         self.declare_parameter("min_speed", 0.20)         # 转弯时最低速（米/秒），别停
