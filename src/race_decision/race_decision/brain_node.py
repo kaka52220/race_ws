@@ -155,12 +155,12 @@ class BrainNode(MissionMixin, Node):
         # ★ 横向偏置：车在弯里系统性偏右（稳态误差），用这个把目标点往左挪。
         #   e_use = e - e_bias_m。正值 = 让车往左走。
         #   调法：车跑直道，看它偏哪边；弯道里也偏右就加到 0.03~0.06。
-        self.declare_parameter("e_bias_m", -0.0129)
+        self.declare_parameter("e_bias_m", -0.0170)
         # 2026-10-29 实测（车横移 ±10cm，用 e_live 读）：
         #   中心 e=-1.11  左10cm e=+6.81  右10cm e=-8.69
         #   最小二乘 e = 0.775*x - 1.0  → 视觉横向量程只有实际的 77.5%
         #   e_gain = 1/0.775 = 1.29 把量程补回来
-        self.declare_parameter("e_gain", 1.29)
+        self.declare_parameter("e_gain", 1.19)
         self.declare_parameter("e_clip_m", 0.20)
         # ★ 车道总宽才 0.54m，|e|>0.27 说明车已经在赛道外了。
         #   0.35 时纠偏角 = atan(0.7×0.35/0.5) = 26° → 打满舵。
@@ -658,7 +658,10 @@ class BrainNode(MissionMixin, Node):
                     # 纯追踪给出的前轮角
                     d_pp = math.atan2(2.0 * Lw * math.sin(alpha), la)
                     # 横向纠偏（Stanley 式）：把车拉回车道的中心
-                    e_now = float(getattr(_m, "lateral_error", 0.0))
+                    # 用和 Stanley 分支同一套校正（e_gain / e_bias_m），
+                    # 否则纯追踪的纠偏少了这层补偿，力度不足。
+                    e_now = (float(getattr(_m, "lateral_error", 0.0))
+                             * float(g("e_gain").value) - float(g("e_bias_m").value))
                     v_for_e = max(v_cmd, float(g("v_stanley_min").value))
                     d_e = math.atan2(float(g("pp_k_e").value) * e_now / v_for_e, 1.0)
                     delta = (d_pp + d_e
