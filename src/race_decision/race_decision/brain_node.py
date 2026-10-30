@@ -45,7 +45,7 @@ class BrainNode(MissionMixin, Node):
         # ── 全部可调参数（现场用 ros2 param set 改，立即生效）──
         # 车辆几何
         self.declare_parameter("wheelbase_m", 0.143)
-        self.declare_parameter("steer_max_deg", 36.0)  # 舵角上限。25 时前轮 15.2°→最小半径 0.53m，实测 14.1% 的帧打满，
+        self.declare_parameter("steer_max_deg", 32.0)  # 舵角上限。25 时前轮 15.2°→最小半径 0.53m，实测 14.1% 的帧打满，
         # 正常弯道就没余量了。32 → 前轮 19.5°、半径 0.40m。硬件上限 40。
         self.declare_parameter("steer_trim_deg", 1.2)
         # 2026-10-29 直线实测：e 中位 -4.8cm、w 均值 +1.9 度，说明机械恒定右偏，
