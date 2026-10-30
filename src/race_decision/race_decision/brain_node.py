@@ -82,6 +82,11 @@ class BrainNode(MissionMixin, Node):
         #   offset ≈ la²·κ/2 = 0.31²×2.27/2 ≈ 11cm —— 和实测压内线量级一致。
         #   所以按曲率给一个"向外"的固定补偿：κ 越大减的舵角越多。
         self.declare_parameter("pp_curve_bias_deg", 2.5)
+        # ★ 2026-10-30 按需求：弯道里把纯追踪的"目标点"往弯外侧挪，
+        #   让车走在真车道中心偏外一点，擦内线时还有余量。
+        #   直接改 x_a（目标点横向），效果一对一，不像改 e 会被 pp_k_e 衰减。
+        #   左弯(κ>0) → 目标点往右 → 车往外；右弯(κ<0) → 往左 → 车往外。
+        self.declare_parameter("pp_target_offset_m", 0.05)
         self.declare_parameter("stanley_k", 0.52)
         # ★ 2026-10-29：eval_d 从 0.22 减到 0.10 后 e 失去预瞄，直道画龙。
         #   在控制端加「微分预瞄」补回阻尼：e_lead = e + e_lead_s * de/dt
@@ -674,6 +679,10 @@ class BrainNode(MissionMixin, Node):
                         k_best = i
                 d_a = float(_pd[k_best])
                 x_a = float(_px[k_best])
+                # 目标点往弯外侧平移（path_x 是右正，κ>0 左弯 → x_a 加正值 = 往右）
+                _k2 = float(getattr(_m, "curvature", 0.0))
+                if abs(_k2) > 0.5:
+                    x_a += math.copysign(float(g("pp_target_offset_m").value), _k2)
                 if d_a > 0.10 and abs(x_a) < 1.5:
                     # lane_tracker 的 BEV 横轴是「右为正」，而控制器约定「左为正」，
                     # 所以这里要取负号（实测不取负时舵机方向反）。
