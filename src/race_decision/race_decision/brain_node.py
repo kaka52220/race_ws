@@ -74,6 +74,10 @@ class BrainNode(MissionMixin, Node):
         #   纯追踪跟踪的是**路径上**前方 look-ahead 的点，天然连续。
         self.declare_parameter("use_pp", True)
         self.declare_parameter("pp_lookahead_m", 0.55)
+        # ★ 2026-10-30：纯追踪跟踪的是「相对车体的路径」，车横向偏了路径也跟着偏，
+        #   所以它天然不纠正横向偏差（实测 e=-30cm 时舵角只给 -2.4 度）。
+        #   加一个 Stanley 式的横向纠偏项补上这个缺口。
+        self.declare_parameter("pp_k_e", 0.25)
         self.declare_parameter("stanley_k", 0.52)
         # ★ 2026-10-29：eval_d 从 0.22 减到 0.10 后 e 失去预瞄，直道画龙。
         #   在控制端加「微分预瞄」补回阻尼：e_lead = e + e_lead_s * de/dt
@@ -651,7 +655,13 @@ class BrainNode(MissionMixin, Node):
                     # 所以这里要取负号（实测不取负时舵机方向反）。
                     alpha = math.atan2(-x_a, d_a)
                     Lw = float(g("wheelbase_m").value)
-                    delta = (math.atan2(2.0 * Lw * math.sin(alpha), la)
+                    # 纯追踪给出的前轮角
+                    d_pp = math.atan2(2.0 * Lw * math.sin(alpha), la)
+                    # 横向纠偏（Stanley 式）：把车拉回车道的中心
+                    e_now = float(getattr(_m, "lateral_error", 0.0))
+                    v_for_e = max(v_cmd, float(g("v_stanley_min").value))
+                    d_e = math.atan2(float(g("pp_k_e").value) * e_now / v_for_e, 1.0)
+                    delta = (d_pp + d_e
                              + math.radians(float(g("steer_trim_deg").value))) / ratio
         delta_raw = delta          # 滤波/限幅前的原始转角，只用于日志诊断
 
