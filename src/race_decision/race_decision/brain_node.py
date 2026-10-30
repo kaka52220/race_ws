@@ -647,7 +647,9 @@ class BrainNode(MissionMixin, Node):
                 d_a = float(_pd[k_best])
                 x_a = float(_px[k_best])
                 if d_a > 0.10 and abs(x_a) < 1.5:
-                    alpha = math.atan2(x_a, d_a)
+                    # lane_tracker 的 BEV 横轴是「右为正」，而控制器约定「左为正」，
+                    # 所以这里要取负号（实测不取负时舵机方向反）。
+                    alpha = math.atan2(-x_a, d_a)
                     Lw = float(g("wheelbase_m").value)
                     delta = (math.atan2(2.0 * Lw * math.sin(alpha), la)
                              + math.radians(float(g("steer_trim_deg").value))) / ratio
