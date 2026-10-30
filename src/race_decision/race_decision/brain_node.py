@@ -73,7 +73,7 @@ class BrainNode(MissionMixin, Node):
         # ★ 2026-10-29：eval_d 从 0.22 减到 0.10 后 e 失去预瞄，直道画龙。
         #   在控制端加「微分预瞄」补回阻尼：e_lead = e + e_lead_s * de/dt
         #   这样 e 的方向仍然正确（测量点没动），又有预瞄抑制振荡。
-        self.declare_parameter("e_lead_s", 0.25)  # 实际 e 增益 0.52/0.608*1.29=1.10（直道稳定值）  # e 增益。它直接用实测的 e，不依赖拟合宽度/曲率。
+        self.declare_parameter("e_lead_s", 0.10)  # 实际 e 增益 0.52/0.608*1.29=1.10（直道稳定值）  # e 增益。它直接用实测的 e，不依赖拟合宽度/曲率。
         # 赛道宽度变化时提前量(κ)不可靠，加大这个才是"直接多打。
         # 0.7 → 1.0：e=15cm 时纠偏角 9.9° → 14.0°。
         # 转向律的权重（0~1）。见下方 on_track 里的说明。
@@ -88,7 +88,7 @@ class BrainNode(MissionMixin, Node):
         self.declare_parameter("theta_clip_deg", 30.0)
         #   ★ 2026-10-24 调通的值：0.3。进弯靠它提前打方向。
         #     设 0 会明显「进弯滞后」（少了 0.3×θ 这一项前馈）。
-        self.declare_parameter("kappa_gain", 1.15)   # 曲率前馈权重（配合死区后可以开大）。
+        self.declare_parameter("kappa_gain", 1.00)   # 曲率前馈权重（配合死区后可以开大）。
         self.declare_parameter("kappa_deadband", 0.15)  # 曲率死区 1/m：|κ| 小于它不出前馈
         #   前馈角 = kappa_gain × atan(0.143 × κ)。
         #   κ=1.5 时：0.5→6.0°，1.0→12.1°。弯道转不过来就往上加。
