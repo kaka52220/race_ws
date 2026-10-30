@@ -114,7 +114,7 @@ class BrainNode(MissionMixin, Node):
         self.declare_parameter("max_speed", 0.60)         # 全局最高速（米/秒）
         self.declare_parameter("min_speed", 0.20)         # 转弯时最低速（米/秒），别停
         self.declare_parameter("speed_scale", 1.0)        # 一键倍率：0.5 = 全部减半
-        self.declare_parameter("a_lat", 0.50)
+        self.declare_parameter("a_lat", 0.70)
         # 弯道限速 v = √(a_lat/κ)。0.17 太保守（κ=1.5 时只有 0.34 m/s）；
         # 0.30 → κ=1.5 时 0.45 m/s（+31%）。再大要靠 steer_max_deg 撑住舵角：
         # 现在 steer_max=32°、前馈带死区，比之前有余量。
