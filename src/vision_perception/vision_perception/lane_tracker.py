@@ -599,6 +599,20 @@ class LaneTracker:
         # +1.07 翻成 -1.03（mode=0，两条线都在），舵角因此从 +21.7 甩到 -0.7。
         # 不管几条线，theta 与 kappa 反号且都够大就是不可能的组合 —— kappa 的符号
         # 交给 theta 定（theta 是一阶量，比二阶的曲率可靠）。
+        # ★ 2026-10-30 实测（斑马线后左弯，两次都发生）：theta 稳定 -16 度，
+        #   但 kappa 在 0.1 秒内从 +0.84 翻到 -1.17，舵角因此从 +12.9 甩到 -25.6。
+        #   kappa 是二阶量、对噪声极敏感 —— 与上一帧符号相反且都够大时判为跳变，
+        #   沿用上一帧的 kappa（不更新），并降低质量。
+        if getattr(self, "kappa_prev", None) is not None:
+            if (abs(kappa) > 0.5 and abs(self.kappa_prev) > 0.5
+                    and kappa * self.kappa_prev < 0.0):
+                kappa = self.kappa_prev
+                quality *= 0.7
+            else:
+                self.kappa_prev = kappa
+        else:
+            self.kappa_prev = kappa
+
         if abs(kappa) > 0.2 and abs(math.degrees(theta)) > 8.0 and theta * kappa < 0.0:
             # 单边界时 kappa 的符号不可靠（实测画面左弯却报 -0.86）。
             # 幅度保留，符号改由 theta（一阶量，更可靠）决定 —— 不能直接清零，
