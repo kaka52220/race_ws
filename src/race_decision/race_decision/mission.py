@@ -147,7 +147,7 @@ class MissionMixin:
         P("lostyaw_max_m", 0.8)        # 航向保持最多走这么远，之后退回原丢线逻辑
         # ── 圈数 / 终点 ──
         P("laps", 2)
-        P("finish_enable", True)
+        P("finish_enable", False)
         P("finish_extra_m", 0.35)      # 过了起点线再多走多远停（整车过线）
         P("cw_voice_text", "人行道前停车，礼让行人")
         # ── 日志 ──
