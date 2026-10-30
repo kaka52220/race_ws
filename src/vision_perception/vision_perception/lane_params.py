@@ -72,7 +72,7 @@ DEFAULTS = {
     "head_len_m": 0.30,        # theta 用起点后多长一段中心线的主方向
     "smooth_n": 9,             # 中心线局部二次平滑窗口（步，奇数）
     "curv_len_m": 0.40,        # theta/kappa/e 用起点后多长一段中心线做二次拟合
-    "good_len_m": 0.50,        # 走出这么长就算满分质量
+    "good_len_m": 0.30,        # 走出这么长就算满分质量
     "eval_d_m": 0.10,          # e 在相机前多远处量
     "look_d_m": 0.50,          # 预瞄点距离（给纯追踪）
 
@@ -80,7 +80,7 @@ DEFAULTS = {
     "theta_offset_deg": 0.0,
     "e_margin_m": 0.15,        # |e| 允许超出半车道宽多少
     "e_abs_limit_m": 0.60,
-    "quality_min": 0.30,       # 低于它 → is_lost
+    "quality_min": 0.22,       # 低于它 → is_lost
     "theta_limit_deg": 110.0,
     "mode_hold_frames": 8,      # mode 从单边界回到双边需要连续几帧（滞回，防抖）  # 急弯里车被甩到外侧时，车道方向真的能到 80~90°（实拍 lap2_0130 等）
     # 最小转弯半径：前轮最大实际 15.2°（舵机 25° 指令），R=0.143/tan15.2°=0.53 m
