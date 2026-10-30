@@ -236,7 +236,11 @@ class BrainNode(MissionMixin, Node):
         #   不影响触发判定，所以没有误触发风险。
         self.declare_parameter("voice_enable", True)   # 斑马线停车语音播报
         self.declare_parameter("crosswalk_stop_s", 3.3)    # 停几秒（规则要求 3s）
-        self.declare_parameter("crosswalk_rearm", 0.6)     # 分数掉到触发值的这个比例以下，才允许下次再停
+        self.declare_parameter("crosswalk_rearm", 0.6)
+        # ★ 2026-10-30 实测：车停在斑马线正上方时 cw 分数一直很高，
+        #   冷却结束后必然重触发，表现为 STOP_CROSSWALK 反复出现（178 帧/5.9 秒）。
+        #   改成：停完之后必须再前进这么远（里程）才重新武装。
+        self.declare_parameter("crosswalk_rearm_dist_m", 0.60)     # 分数掉到触发值的这个比例以下，才允许下次再停
         # 冷却：停完之后这么多秒内不再触发。防止分数在阈值附近抖动时
         # 反复触发把自己永久锁死（实测过：假值和真值抢话题就会这样）。
         self.declare_parameter("crosswalk_cooldown_s", 1.0)
@@ -342,6 +346,7 @@ class BrainNode(MissionMixin, Node):
         if self.cw >= trig and self.cw_armed and cw_ok and getattr(self, "mode", "") != "FINISH" and now >= self.cw_done_at + cool:
             self.cw_stop_until = now + float(g("crosswalk_stop_s").value)
             self.cw_armed = False
+            self.cw_stop_s_at = getattr(self, "od_s", 0.0)   # 停车时的里程
             self.on_crosswalk_event(now)
             # 语音延后到车真正停稳后再播（0.6s 后），
             # 避免音频初始化/USB 声卡唤醒的 CPU 抖动落在刹车那一瞬间。
@@ -352,7 +357,10 @@ class BrainNode(MissionMixin, Node):
                 f"{float(g('crosswalk_stop_s').value):.1f}s",
                 throttle_duration_sec=2.0)
         elif self.cw < trig * float(g("crosswalk_rearm").value) \
-                and now >= self.cw_done_at + cool:
+                and now >= self.cw_done_at + cool \
+                and (getattr(self, "od_s", 0.0)
+                     - getattr(self, "cw_stop_s_at", 0.0)
+                     >= float(g("crosswalk_rearm_dist_m").value)):
             self.cw_armed = True
         if now < self.cw_stop_until:
             self.state = "STOP_CROSSWALK"
