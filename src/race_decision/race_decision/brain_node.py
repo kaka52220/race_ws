@@ -156,12 +156,12 @@ class BrainNode(MissionMixin, Node):
         # ★ 横向偏置：车在弯里系统性偏右（稳态误差），用这个把目标点往左挪。
         #   e_use = e - e_bias_m。正值 = 让车往左走。
         #   调法：车跑直道，看它偏哪边；弯道里也偏右就加到 0.03~0.06。
-        self.declare_parameter("e_bias_m", -0.0170)
+        self.declare_parameter("e_bias_m", -0.0156)
         # 2026-10-29 实测（车横移 ±10cm，用 e_live 读）：
         #   中心 e=-1.11  左10cm e=+6.81  右10cm e=-8.69
         #   最小二乘 e = 0.775*x - 1.0  → 视觉横向量程只有实际的 77.5%
         #   e_gain = 1/0.775 = 1.29 把量程补回来
-        self.declare_parameter("e_gain", 1.19)
+        self.declare_parameter("e_gain", 1.11)
         self.declare_parameter("e_clip_m", 0.20)
         # ★ 车道总宽才 0.54m，|e|>0.27 说明车已经在赛道外了。
         #   0.35 时纠偏角 = atan(0.7×0.35/0.5) = 26° → 打满舵。
