@@ -151,6 +151,7 @@ class BrainNode(MissionMixin, Node):
         # 实测：路口 / 丢线边缘 quality 会掉到 0.3~0.5，此时的 e 会跳 ±30cm，
         # 直接喂进控制就是"抽搐"。
         self.declare_parameter("quality_gate", 0.55)
+        self.declare_parameter("q_hold_frames", 3)
         #   连续这么多帧都跳，说明是真位移（车真的偏了），就接受
         # ★ 横向偏置：车在弯里系统性偏右（稳态误差），用这个把目标点往左挪。
         #   e_use = e - e_bias_m。正值 = 让车往左走。
@@ -427,6 +428,17 @@ class BrainNode(MissionMixin, Node):
 
         # ── 质量门控 ──
         q_now = float(getattr(msg, "quality", 1.0))
+        # ★ 2026-10-30 实测：q 在一帧内从 0.17 跳到 0.63，冻结解除的瞬间
+        #   theta 从 -47 跳到 +13（60 度），舵角甩 18 度 —— 这是"抽"的直接来源。
+        #   q 也做滞回：一旦判低质量，连续 q_hold 帧内都按低质量处理，
+        #   避免"垃圾 -> 正常"的瞬间切换。
+        _qg = float(g("quality_gate").value)
+        if q_now < _qg:
+            self.q_hold_cnt = int(g("q_hold_frames").value)
+        elif getattr(self, "q_hold_cnt", 0) > 0:
+            self.q_hold_cnt -= 1
+            q_now = 0.0          # 强制走冻结分支
+
         if q_now < float(g("quality_gate").value) and self.e_prev is not None:
             e = self.e_prev
         # ★ 2026-10-30 实测（路口出口 t=8.3s）：q=0.00 的帧 theta=+57/kappa=+2.01
