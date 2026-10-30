@@ -58,9 +58,9 @@ class BrainNode(MissionMixin, Node):
         # ★ 2026-10-29 实测：左弯 e 中位 -5.9cm、右弯 -5.9cm（都偏右），
         #   直道只偏 -0.5cm → 左右弯都往右跑 = 转向机构恒定右偏。
         #   +2.5° 约修 4cm；代价是直道往左偏约 2.6cm。     # 直线跑偏时调这个
-        self.declare_parameter("steer_rate_deg_per_s", 300.0)  # 舵机变化率上限
+        self.declare_parameter("steer_rate_deg_per_s", 400.0)  # 舵机变化率上限
         self.declare_parameter("steer_sign", 1.0)         # 方向翻转。★ 2026-10-23 静态实测：车偏左时前轮应指车道中心；设为 -1 时指外侧 → 正确的就是 +1
-        self.declare_parameter("steer_tau_s", 0.05)
+        self.declare_parameter("steer_tau_s", 0.03)
         # ★ 实测 0.08 时输出滞后明显，0.05 更好。再小方向会抖。       # 转向低通时间常数（秒）。画龙就调大，0=关闭
 
         # 控制律
