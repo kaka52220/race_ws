@@ -687,6 +687,12 @@ class BrainNode(MissionMixin, Node):
                     # lane_tracker 的 BEV 横轴是「右为正」，而控制器约定「左为正」，
                     # 所以这里要取负号（实测不取负时舵机方向反）。
                     alpha = math.atan2(-x_a, d_a)
+                    self.get_logger().info(
+                        "[PP] la=%.2f d_a=%.2f x_a=%+.3f alpha=%+.1fdeg off=%.3f k=%+.2f"
+                        % (la, d_a, x_a, math.degrees(alpha),
+                           float(g("pp_target_offset_m").value),
+                           float(getattr(_m, "curvature", 0.0))),
+                        throttle_duration_sec=1.0)
                     Lw = float(g("wheelbase_m").value)
                     # 纯追踪给出的前轮角
                     d_pp = math.atan2(2.0 * Lw * math.sin(alpha), la)
